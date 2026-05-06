@@ -81,3 +81,32 @@ export interface GlobalTrafficStats {
   monthDown: number;
   updatedAt: string | null;
 }
+
+export interface AlertEvent {
+  id: string;
+  level: "info" | "warn" | "error";
+  kind: string;
+  serverId: string | null;
+  serverName: string | null;
+  message: string;
+  timestamp: string;
+}
+
+export interface ToastMessage {
+  id: string;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface TerminalStatusEvent {
+  sessionId: string;
+  serverId: string;
+  status: "connecting" | "connected" | "reconnecting" | "disconnected";
+  message: string;
+}
+
+export interface TerminalOutputEvent {
+  sessionId: string;
+  serverId: string;
+  data: string;
+}

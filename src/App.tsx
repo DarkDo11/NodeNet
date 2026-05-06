@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import Clients from "./components/Clients";
 import Dashboard from "./components/Dashboard";
+import EventsLog from "./components/EventsLog";
 import Inbounds from "./components/Inbounds";
 import QrModal from "./components/QrModal";
 import Settings from "./components/Settings";
 import Sidebar, { type AppView } from "./components/Sidebar";
+import TerminalView from "./components/TerminalView";
+import ToastHost from "./components/ToastHost";
 import Topbar from "./components/Topbar";
+import { useEventsStore } from "./stores/eventsStore";
 import { useMetricsStore } from "./stores/metricsStore";
 import { useServerStore } from "./stores/serverStore";
 import { useThreeXStore } from "./stores/threeXStore";
@@ -56,6 +60,14 @@ export default function App() {
     downloadConfig,
     refreshGlobalStats,
   } = useThreeXStore();
+  const {
+    events,
+    toasts,
+    error: eventsError,
+    loadEvents,
+    attachAlertListeners,
+    dismissToast,
+  } = useEventsStore();
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -87,6 +99,18 @@ export default function App() {
   useEffect(() => {
     void loadServers();
   }, [loadServers]);
+
+  useEffect(() => {
+    void loadEvents();
+    let cleanup: (() => void) | null = null;
+    void attachAlertListeners().then((unlisten) => {
+      cleanup = unlisten;
+    });
+
+    return () => {
+      cleanup?.();
+    };
+  }, [attachAlertListeners, loadEvents]);
 
   useEffect(() => {
     if (servers.length === 0) return;
@@ -126,6 +150,23 @@ export default function App() {
 
     return () => window.clearInterval(timer);
   }, [pollIntervalSec, refreshGlobalStats, servers]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
+      if (!/^[1-9]$/.test(event.key)) return;
+
+      const index = Number(event.key) - 1;
+      const server = servers[index];
+      if (!server) return;
+
+      event.preventDefault();
+      selectServer(server.id);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectServer, servers]);
 
   return (
     <div className="app-shell">
@@ -229,6 +270,16 @@ export default function App() {
             }}
           />
         ) : null}
+        {activeView === "terminal" ? <TerminalView server={selectedServer} /> : null}
+        {activeView === "events" ? (
+          <EventsLog
+            events={events}
+            error={eventsError}
+            onRefresh={() => {
+              void loadEvents();
+            }}
+          />
+        ) : null}
         {activeView === "settings" ? (
           <Settings
             servers={servers}
@@ -238,6 +289,7 @@ export default function App() {
         ) : null}
       </div>
       <QrModal title={qrTitle} link={qrLink} onClose={closeQr} />
+      <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

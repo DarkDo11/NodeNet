@@ -259,6 +259,22 @@ button:disabled {
   color: var(--red);
 }
 
+.health-pill.connected {
+  background: rgba(81, 216, 138, 0.15);
+  color: var(--green);
+}
+
+.health-pill.connecting,
+.health-pill.reconnecting {
+  background: rgba(255, 204, 102, 0.16);
+  color: var(--yellow);
+}
+
+.health-pill.disconnected {
+  background: rgba(255, 107, 122, 0.16);
+  color: var(--red);
+}
+
 .status-dot.online {
   background: var(--green);
 }
@@ -333,6 +349,7 @@ button:disabled {
 .health-pill {
   display: inline-flex;
   align-items: center;
+  gap: 7px;
   min-height: 34px;
   padding: 0 12px;
   border: 1px solid var(--border);
@@ -711,6 +728,21 @@ code {
   background: rgba(81, 216, 138, 0.12);
 }
 
+.status-label.info {
+  color: var(--blue);
+  background: rgba(87, 185, 255, 0.14);
+}
+
+.status-label.warn {
+  color: var(--yellow);
+  background: rgba(255, 204, 102, 0.14);
+}
+
+.status-label.error {
+  color: var(--red);
+  background: rgba(255, 107, 122, 0.14);
+}
+
 .status-label.disabled,
 .status-label.expired,
 .status-label.limited {
@@ -870,6 +902,116 @@ code {
   word-break: break-all;
 }
 
+.terminal-content {
+  min-height: 0;
+}
+
+.terminal-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #07080b;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  min-height: 360px;
+  padding: 10px;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.events-panel {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  backdrop-filter: blur(28px) saturate(1.2);
+}
+
+.events-table {
+  display: grid;
+  grid-template-columns: 90px minmax(140px, 0.8fr) 190px minmax(260px, 1.8fr);
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.events-table.header {
+  min-height: 42px;
+  padding: 0 14px;
+  color: var(--faint);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.events-table.row {
+  min-height: 54px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.events-table.row > span:last-child {
+  color: var(--text);
+}
+
+.toast-host {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100vw - 36px));
+  z-index: 80;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: 1fr 28px;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 10px 10px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(18, 20, 26, 0.94);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(24px) saturate(1.2);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.toast.warn {
+  border-color: rgba(255, 204, 102, 0.32);
+}
+
+.toast.error {
+  border-color: rgba(255, 107, 122, 0.34);
+}
+
+.toast.info {
+  border-color: rgba(87, 185, 255, 0.32);
+}
+
+.toast button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 248px 1fr;
@@ -887,6 +1029,10 @@ code {
   }
 
   .server-table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .events-table {
     grid-template-columns: 1fr;
   }
 

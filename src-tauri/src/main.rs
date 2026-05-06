@@ -1,7 +1,9 @@
+mod alerts;
 mod commands;
 mod config;
 mod metrics;
 mod ssh;
+mod terminal;
 mod three_x_ui;
 
 fn main() {
@@ -9,6 +11,12 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(terminal::TerminalState::default())
+        .manage(alerts::AlertsState::load())
+        .setup(|app| {
+            alerts::start_alert_poller(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_config_path,
             commands::get_servers,
@@ -27,7 +35,12 @@ fn main() {
             commands::generate_client_link,
             commands::restart_xray,
             commands::reboot_server,
-            commands::download_config
+            commands::download_config,
+            terminal::terminal_connect,
+            terminal::terminal_input,
+            terminal::terminal_resize,
+            terminal::terminal_disconnect,
+            alerts::get_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running NodeNet");

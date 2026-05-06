@@ -1,7 +1,17 @@
-import { Activity, Gauge, HardDrive, Network, Settings, ShieldCheck, Users } from "lucide-react";
+import {
+  Activity,
+  Gauge,
+  HardDrive,
+  Network,
+  ScrollText,
+  Settings,
+  ShieldCheck,
+  SquareTerminal,
+  Users,
+} from "lucide-react";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
-export type AppView = "dashboard" | "inbounds" | "clients" | "settings";
+export type AppView = "dashboard" | "inbounds" | "clients" | "terminal" | "events" | "settings";
 
 interface SidebarProps {
   servers: ServerConfig[];
@@ -67,6 +77,22 @@ export default function Sidebar({
         >
           <Users size={16} />
           <span>Clients</span>
+        </button>
+        <button
+          className={activeView === "terminal" ? "nav-tab active" : "nav-tab"}
+          onClick={() => onChangeView("terminal")}
+          title="Terminal"
+        >
+          <SquareTerminal size={16} />
+          <span>Terminal</span>
+        </button>
+        <button
+          className={activeView === "events" ? "nav-tab active" : "nav-tab"}
+          onClick={() => onChangeView("events")}
+          title="Events Log"
+        >
+          <ScrollText size={16} />
+          <span>Events</span>
         </button>
         <button
           className={activeView === "settings" ? "nav-tab active" : "nav-tab"}
