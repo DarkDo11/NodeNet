@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "vpnctrl",
+  "version": "0.1.0",
+  "identifier": "com.darkdoll.vpnctrl",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "vpnctrl",
+        "label": "main",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 980,
+        "minHeight": 640,
+        "decorations": true,
+        "transparent": true,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 18
+        },
+        "backgroundColor": "#00000000"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
