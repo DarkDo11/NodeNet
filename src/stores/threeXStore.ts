@@ -81,10 +81,10 @@ const statsFromTotals = (up: number, down: number): GlobalTrafficStats => {
   const now = new Date();
   const dayKey = now.toISOString().slice(0, 10);
   const monthKey = dayKey.slice(0, 7);
-  const dayUpBase = baselineValue(`vpnctrl:traffic:${dayKey}:up`, up);
-  const dayDownBase = baselineValue(`vpnctrl:traffic:${dayKey}:down`, down);
-  const monthUpBase = baselineValue(`vpnctrl:traffic:${monthKey}:up`, up);
-  const monthDownBase = baselineValue(`vpnctrl:traffic:${monthKey}:down`, down);
+  const dayUpBase = baselineValue(`nodenet:traffic:${dayKey}:up`, up);
+  const dayDownBase = baselineValue(`nodenet:traffic:${dayKey}:down`, down);
+  const monthUpBase = baselineValue(`nodenet:traffic:${monthKey}:up`, up);
+  const monthDownBase = baselineValue(`nodenet:traffic:${monthKey}:down`, down);
 
   return {
     dayUp: Math.max(0, up - dayUpBase),

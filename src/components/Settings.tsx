@@ -89,7 +89,7 @@ export default function Settings({
         <div>
           <p className="eyebrow">Preferences</p>
           <h2>Settings</h2>
-          <span className="server-target">{configPath || "~/Library/Application Support/vpnctrl/config.json"}</span>
+          <span className="server-target">{configPath || "~/Library/Application Support/NodeNet/config.json"}</span>
         </div>
       </header>
 

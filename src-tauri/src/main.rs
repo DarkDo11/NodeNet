@@ -30,5 +30,5 @@ fn main() {
             commands::download_config
         ])
         .run(tauri::generate_context!())
-        .expect("error while running vpnctrl");
+        .expect("error while running NodeNet");
 }

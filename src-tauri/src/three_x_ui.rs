@@ -9,7 +9,8 @@ use std::{collections::HashMap, fs, time::Duration};
 use tokio::process::Command;
 use uuid::Uuid;
 
-const KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
+const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
+const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,12 +142,23 @@ pub async fn save_credentials(server: &ServerConfig, username: &str, password: &
 }
 
 pub async fn delete_credentials(server: &ServerConfig) -> Result<()> {
+    let account = keychain_account(server);
+    let primary_result = delete_credentials_from_service(KEYCHAIN_SERVICE, &account).await;
+    let legacy_result = delete_credentials_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await;
+
+    match (primary_result, legacy_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
+    }
+}
+
+async fn delete_credentials_from_service(service: &str, account: &str) -> Result<()> {
     let output = Command::new("security")
         .arg("delete-generic-password")
         .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
+        .arg(service)
         .arg("-a")
-        .arg(keychain_account(server))
+        .arg(account)
         .output()
         .await
         .context("failed to execute security delete-generic-password")?;
@@ -538,22 +550,14 @@ async fn login_with_client(
 }
 
 async fn read_credentials(server: &ServerConfig) -> Result<PanelCredentials> {
-    let output = Command::new("security")
-        .arg("find-generic-password")
-        .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
-        .arg("-a")
-        .arg(keychain_account(server))
-        .arg("-w")
-        .output()
-        .await
-        .context("failed to execute security find-generic-password")?;
+    let account = keychain_account(server);
+    let raw = match read_credentials_from_service(KEYCHAIN_SERVICE, &account).await? {
+        Some(raw) => raw,
+        None => read_credentials_from_service(LEGACY_KEYCHAIN_SERVICE, &account)
+            .await?
+            .context("3x-ui password is not saved in Keychain")?,
+    };
 
-    if !output.status.success() {
-        bail!("3x-ui password is not saved in Keychain");
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if raw.starts_with('{') {
         return serde_json::from_str::<PanelCredentials>(&raw)
             .context("failed to parse 3x-ui credentials from Keychain");
@@ -566,6 +570,27 @@ async fn read_credentials(server: &ServerConfig) -> Result<PanelCredentials> {
             .unwrap_or_else(|| "admin".to_string()),
         password: raw,
     })
+}
+
+async fn read_credentials_from_service(service: &str, account: &str) -> Result<Option<String>> {
+    let output = Command::new("security")
+        .arg("find-generic-password")
+        .arg("-s")
+        .arg(service)
+        .arg("-a")
+        .arg(account)
+        .arg("-w")
+        .output()
+        .await
+        .context("failed to execute security find-generic-password")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
 }
 
 async fn get_raw_inbounds(session: &mut PanelSession) -> Result<Vec<RawInbound>> {

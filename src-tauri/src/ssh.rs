@@ -10,7 +10,8 @@ use std::{
 use tokio::{net::TcpStream, process::Command, time::timeout};
 use uuid::Uuid;
 
-const KEYCHAIN_SERVICE: &str = "vpnctrl.ssh";
+const KEYCHAIN_SERVICE: &str = "nodenet.ssh";
+const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.ssh";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,10 +54,20 @@ pub async fn save_password(server: &ServerConfig, password: &str) -> Result<()> 
 
 pub async fn delete_password(server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
+    let primary_result = delete_password_from_service(KEYCHAIN_SERVICE, &account).await;
+    let legacy_result = delete_password_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await;
+
+    match (primary_result, legacy_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
+    }
+}
+
+async fn delete_password_from_service(service: &str, account: &str) -> Result<()> {
     let output = Command::new("security")
         .arg("delete-generic-password")
         .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
+        .arg(service)
         .arg("-a")
         .arg(account)
         .output()
@@ -77,10 +88,18 @@ pub async fn delete_password(server: &ServerConfig) -> Result<()> {
 
 pub async fn read_password(server: &ServerConfig) -> Result<Option<String>> {
     let account = keychain_account(server);
+    if let Some(password) = read_password_from_service(KEYCHAIN_SERVICE, &account).await? {
+        return Ok(Some(password));
+    }
+
+    read_password_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await
+}
+
+async fn read_password_from_service(service: &str, account: &str) -> Result<Option<String>> {
     let output = Command::new("security")
         .arg("find-generic-password")
         .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
+        .arg(service)
         .arg("-a")
         .arg(account)
         .arg("-w")
@@ -182,7 +201,7 @@ pub async fn execute(server: &ServerConfig, remote_command: &str) -> Result<Stri
             .env("SSH_ASKPASS", askpass_path)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0")
-            .env("VPNCTRL_SSH_PASSWORD", password);
+            .env("NODENET_SSH_PASSWORD", password);
     }
 
     command
@@ -225,7 +244,7 @@ pub async fn download_file(
     } else {
         None
     };
-    let batch_path = std::env::temp_dir().join(format!("vpnctrl-sftp-{}.batch", Uuid::new_v4()));
+    let batch_path = std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4()));
     fs::write(
         &batch_path,
         format!(
@@ -263,7 +282,7 @@ pub async fn download_file(
             .env("SSH_ASKPASS", askpass_path)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0")
-            .env("VPNCTRL_SSH_PASSWORD", password);
+            .env("NODENET_SSH_PASSWORD", password);
     }
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
@@ -286,10 +305,10 @@ pub async fn download_file(
 }
 
 fn create_askpass_script() -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("vpnctrl-askpass-{}.sh", Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("nodenet-askpass-{}.sh", Uuid::new_v4()));
     fs::write(
         &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$VPNCTRL_SSH_PASSWORD\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$NODENET_SSH_PASSWORD\"\n",
     )
     .with_context(|| format!("failed to write askpass script {}", path.display()))?;
 

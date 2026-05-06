@@ -38,7 +38,7 @@ export default function Sidebar({
           <ShieldCheck size={20} strokeWidth={2.2} />
         </div>
         <div>
-          <h1>vpnctrl</h1>
+          <h1>NodeNet</h1>
           <p>SSH monitor</p>
         </div>
       </div>

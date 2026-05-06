@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "vpnctrl",
+  "productName": "NodeNet",
   "version": "0.1.0",
-  "identifier": "com.darkdoll.vpnctrl",
+  "identifier": "com.darkdoll.nodenet",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "vpnctrl",
+        "title": "NodeNet",
         "label": "main",
         "width": 1180,
         "height": 760,

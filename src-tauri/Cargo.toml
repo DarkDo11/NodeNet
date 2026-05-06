@@ -1,8 +1,8 @@
 [package]
-name = "vpnctrl"
+name = "nodenet"
 version = "0.1.0"
 description = "macOS desktop VPN server controller and monitor"
-authors = ["vpnctrl"]
+authors = ["NodeNet"]
 edition = "2021"
 
 [build-dependencies]

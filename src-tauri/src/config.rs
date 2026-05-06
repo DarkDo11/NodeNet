@@ -45,17 +45,32 @@ impl Default for AppConfig {
 
 pub fn config_dir() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("unable to resolve user directories")?;
-    Ok(base_dirs.data_dir().join("vpnctrl"))
+    Ok(base_dirs.data_dir().join("NodeNet"))
 }
 
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }
 
+fn legacy_config_path() -> Result<PathBuf> {
+    let base_dirs = BaseDirs::new().context("unable to resolve user directories")?;
+    Ok(base_dirs.data_dir().join("vpnctrl").join("config.json"))
+}
+
 pub fn load_config() -> Result<AppConfig> {
     let path = config_path()?;
 
     if !path.exists() {
+        let legacy_path = legacy_config_path()?;
+        if legacy_path.exists() {
+            let raw = fs::read_to_string(&legacy_path)
+                .with_context(|| format!("failed to read config at {}", legacy_path.display()))?;
+            let config = serde_json::from_str::<AppConfig>(&raw)
+                .with_context(|| format!("failed to parse config at {}", legacy_path.display()))?;
+            save_config(&config)?;
+            return Ok(config);
+        }
+
         let config = AppConfig::default();
         save_config(&config)?;
         return Ok(config);
