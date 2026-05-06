@@ -1,5 +1,10 @@
-use crate::{config::load_config, metrics, ssh, three_x_ui};
+use crate::{config::load_config, keychain, metrics, ssh, three_x_ui};
+use aes_gcm::{
+    aead::{rand_core::RngCore, Aead, OsRng},
+    Aes256Gcm, KeyInit, Nonce,
+};
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
@@ -17,6 +22,8 @@ use uuid::Uuid;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_EVENTS: usize = 500;
 const EVENTS_APP_DIR: &str = "vpnctrl";
+const EVENTS_KEYCHAIN_SERVICE: &str = "nodenet.events";
+const EVENTS_KEYCHAIN_ACCOUNT: &str = "events-aes-256-gcm";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,19 +51,26 @@ struct AlertsRuntime {
     limited_clients: HashSet<String>,
 }
 
-impl AlertsState {
-    pub fn load() -> Self {
-        let events = load_events().unwrap_or_default().into_iter().collect();
-        Self {
-            events: Mutex::new(events),
-            runtime: Mutex::new(AlertsRuntime::default()),
-        }
-    }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedEventsFile {
+    version: u8,
+    cipher: String,
+    nonce: String,
+    data: String,
 }
 
 #[tauri::command]
 pub async fn get_events(state: State<'_, AlertsState>) -> Result<Vec<AlertEvent>, String> {
     Ok(state.events.lock().await.iter().cloned().collect())
+}
+
+pub async fn load_events_into_state(app: &AppHandle) -> Result<()> {
+    let loaded = load_events(app).await?;
+    let state = app.state::<AlertsState>();
+    let mut events = state.events.lock().await;
+    *events = loaded.into_iter().collect();
+    Ok(())
 }
 
 pub fn start_alert_poller(app: AppHandle) {
@@ -101,7 +115,7 @@ async fn poll_once(app: &AppHandle) -> Result<()> {
             state.runtime.lock().await.down_servers.remove(&server.id);
         }
 
-        if let Ok(sample) = metrics::collect(&server).await {
+        if let Ok(sample) = metrics::collect(app, &server).await {
             let mut event_to_emit = None;
             {
                 let state = app.state::<AlertsState>();
@@ -140,12 +154,12 @@ async fn poll_once(app: &AppHandle) -> Result<()> {
         }
 
         if server.panel_url.is_some() {
-            let Ok(inbounds) = three_x_ui::get_inbounds(&server).await else {
+            let Ok(inbounds) = three_x_ui::get_inbounds(app, &server).await else {
                 continue;
             };
 
             for inbound in inbounds {
-                let Ok(clients) = three_x_ui::get_clients(&server, inbound.id).await else {
+                let Ok(clients) = three_x_ui::get_clients(app, &server, inbound.id).await else {
                     continue;
                 };
 
@@ -215,7 +229,7 @@ async fn push_event(
         events.iter().cloned().collect::<Vec<_>>()
     };
 
-    save_events(&snapshot)?;
+    save_events(app, &snapshot).await?;
     notify(app, &event);
     let _ = app.emit("alert-event", event);
 
@@ -236,7 +250,7 @@ fn notify(app: &AppHandle, event: &AlertEvent) {
         .show();
 }
 
-fn load_events() -> Result<Vec<AlertEvent>> {
+async fn load_events(app: &AppHandle) -> Result<Vec<AlertEvent>> {
     let path = events_path()?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -244,19 +258,82 @@ fn load_events() -> Result<Vec<AlertEvent>> {
 
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read events log {}", path.display()))?;
-    serde_json::from_str::<Vec<AlertEvent>>(&raw)
+
+    if raw.trim_start().starts_with('[') {
+        let events = serde_json::from_str::<Vec<AlertEvent>>(&raw)
+            .with_context(|| format!("failed to parse legacy events log {}", path.display()))?;
+        save_events(app, &events).await?;
+        return Ok(events);
+    }
+
+    let encrypted = serde_json::from_str::<EncryptedEventsFile>(&raw)
+        .with_context(|| format!("failed to parse encrypted events log {}", path.display()))?;
+    let key = events_key(app).await?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("failed to create AES-256 cipher")?;
+    let nonce_bytes = general_purpose::STANDARD
+        .decode(encrypted.nonce)
+        .context("failed to decode events nonce")?;
+    let data = general_purpose::STANDARD
+        .decode(encrypted.data)
+        .context("failed to decode events ciphertext")?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce_bytes), data.as_ref())
+        .map_err(|_| anyhow::anyhow!("failed to decrypt events log"))?;
+
+    serde_json::from_slice::<Vec<AlertEvent>>(&plaintext)
         .with_context(|| format!("failed to parse events log {}", path.display()))
 }
 
-fn save_events(events: &[AlertEvent]) -> Result<()> {
+async fn save_events(app: &AppHandle, events: &[AlertEvent]) -> Result<()> {
     let path = events_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create events directory {}", parent.display()))?;
     }
 
-    fs::write(&path, serde_json::to_string_pretty(events)?)
+    let key = events_key(app).await?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("failed to create AES-256 cipher")?;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let plaintext = serde_json::to_vec(events).context("failed to serialize events log")?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .map_err(|_| anyhow::anyhow!("failed to encrypt events log"))?;
+    let encrypted = EncryptedEventsFile {
+        version: 1,
+        cipher: "AES-256-GCM".to_string(),
+        nonce: general_purpose::STANDARD.encode(nonce),
+        data: general_purpose::STANDARD.encode(ciphertext),
+    };
+
+    fs::write(&path, serde_json::to_string_pretty(&encrypted)?)
         .with_context(|| format!("failed to write events log {}", path.display()))
+}
+
+async fn events_key(app: &AppHandle) -> Result<[u8; 32]> {
+    if let Some(raw) =
+        keychain::read_password(app, EVENTS_KEYCHAIN_SERVICE, EVENTS_KEYCHAIN_ACCOUNT).await?
+    {
+        let decoded = general_purpose::STANDARD
+            .decode(raw)
+            .context("failed to decode events encryption key")?;
+        if decoded.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&decoded);
+            return Ok(key);
+        }
+    }
+
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    keychain::save_password(
+        app,
+        EVENTS_KEYCHAIN_SERVICE,
+        EVENTS_KEYCHAIN_ACCOUNT,
+        &general_purpose::STANDARD.encode(key),
+    )
+    .await?;
+    Ok(key)
 }
 
 fn events_path() -> Result<PathBuf> {

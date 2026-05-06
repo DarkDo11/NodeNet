@@ -52,7 +52,15 @@ export default function Inbounds({
         </div>
       </header>
 
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-state">
+          <div>
+            <strong>Panel unavailable</strong>
+            <span>{error}</span>
+          </div>
+          <button className="command-button" onClick={onRefresh}>Retry</button>
+        </div>
+      ) : null}
 
       <section className="inbounds-panel">
         <div className="inbounds-table header">
@@ -63,27 +71,41 @@ export default function Inbounds({
           <span>Traffic ↑</span>
           <span>Status</span>
         </div>
-        {inbounds.map((inbound) => (
-          <button
-            key={inbound.id}
-            className={
-              selectedInboundId === inbound.id ? "inbounds-table row selected" : "inbounds-table row"
-            }
-            onClick={() => onSelectInbound(inbound.id)}
-          >
-            <strong>{inbound.protocol.toUpperCase()}</strong>
-            <code>{inbound.port}</code>
-            <span>{inbound.clientCount}</span>
-            <span>{formatBytes(inbound.down)}</span>
-            <span>{formatBytes(inbound.up)}</span>
-            <span className={inbound.enable ? "status-label active" : "status-label disabled"}>
-              {inbound.enable ? "active" : "disabled"}
-            </span>
-          </button>
-        ))}
+        {isLoading && inbounds.length === 0
+          ? Array.from({ length: 5 }, (_, index) => (
+            <div key={index} className="inbounds-table row skeleton-row">
+              <span className="skeleton-line" />
+              <span className="skeleton-line" />
+              <span className="skeleton-line" />
+              <span className="skeleton-line" />
+              <span className="skeleton-line" />
+              <span className="skeleton-line" />
+            </div>
+          ))
+          : inbounds.map((inbound) => (
+            <button
+              key={inbound.id}
+              className={
+                selectedInboundId === inbound.id ? "inbounds-table row selected" : "inbounds-table row"
+              }
+              onClick={() => onSelectInbound(inbound.id)}
+            >
+              <strong>{inbound.protocol.toUpperCase()}</strong>
+              <code>{inbound.port}</code>
+              <span>{inbound.clientCount}</span>
+              <span>{formatBytes(inbound.down)}</span>
+              <span>{formatBytes(inbound.up)}</span>
+              <span className={inbound.enable ? "status-label active" : "status-label disabled"}>
+                {inbound.enable ? "active" : "disabled"}
+              </span>
+            </button>
+          ))}
 
         {!isLoading && inbounds.length === 0 ? (
-          <div className="chart-empty">No inbounds loaded</div>
+          <div className="empty-state table-empty">
+            <span>No inbounds loaded</span>
+            <button className="command-button" onClick={onRefresh}>Refresh</button>
+          </div>
         ) : null}
       </section>
     </main>

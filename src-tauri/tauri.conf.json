@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "NodeNet",
   "version": "0.1.0",
-  "identifier": "com.darkdoll.nodenet",
+  "identifier": "com.vpnctrl.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -36,6 +36,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": ["dmg", "app"],
+    "icon": ["icons/icon.png"],
+    "category": "Utility"
   }
 }

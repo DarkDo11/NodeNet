@@ -1,23 +1,44 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { PingResult, ServerConfig } from "../types";
+import type { AppConfig, AppTheme, PingResult, ServerConfig } from "../types";
 
 interface ServerState {
   servers: ServerConfig[];
   selectedServerId: string | null;
   statusById: Record<string, PingResult>;
+  configPollIntervalSec: number;
+  theme: AppTheme;
   isLoading: boolean;
   error: string | null;
   loadServers: () => Promise<void>;
   selectServer: (serverId: string) => void;
+  upsertServer: (server: ServerConfig) => Promise<void>;
+  deleteServer: (serverId: string) => Promise<void>;
+  savePollInterval: (seconds: number) => Promise<void>;
+  saveTheme: (theme: AppTheme) => Promise<void>;
   pingServer: (serverId: string) => Promise<void>;
   pingAllServers: () => Promise<void>;
 }
+
+const applyConfig = (
+  config: AppConfig,
+  currentSelected: string | null,
+) => ({
+  servers: config.servers,
+  configPollIntervalSec: config.pollIntervalSec,
+  theme: config.theme,
+  selectedServerId:
+    currentSelected && config.servers.some((server) => server.id === currentSelected)
+      ? currentSelected
+      : config.servers[0]?.id ?? null,
+});
 
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   selectedServerId: null,
   statusById: {},
+  configPollIntervalSec: 10,
+  theme: "dark",
   isLoading: false,
   error: null,
 
@@ -25,14 +46,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      const servers = await invoke<ServerConfig[]>("get_servers");
-      const currentSelected = get().selectedServerId;
-      const selectedServerId =
-        currentSelected && servers.some((server) => server.id === currentSelected)
-          ? currentSelected
-          : servers[0]?.id ?? null;
-
-      set({ servers, selectedServerId, isLoading: false });
+      const config = await invoke<AppConfig>("get_app_config");
+      set({ ...applyConfig(config, get().selectedServerId), isLoading: false });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : String(error),
@@ -42,6 +57,26 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   selectServer: (serverId) => set({ selectedServerId: serverId }),
+
+  upsertServer: async (server) => {
+    const config = await invoke<AppConfig>("upsert_server", { server });
+    set(applyConfig(config, server.id));
+  },
+
+  deleteServer: async (serverId) => {
+    const config = await invoke<AppConfig>("delete_server", { serverId });
+    set(applyConfig(config, get().selectedServerId === serverId ? null : get().selectedServerId));
+  },
+
+  savePollInterval: async (seconds) => {
+    const config = await invoke<AppConfig>("set_poll_interval", { seconds });
+    set(applyConfig(config, get().selectedServerId));
+  },
+
+  saveTheme: async (theme) => {
+    const config = await invoke<AppConfig>("set_theme", { theme });
+    set(applyConfig(config, get().selectedServerId));
+  },
 
   pingServer: async (serverId) => {
     try {

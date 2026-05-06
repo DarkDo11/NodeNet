@@ -12,6 +12,14 @@ export interface ServerConfig {
   sshKeyPath?: string | null;
 }
 
+export type AppTheme = "dark" | "contrast" | "system";
+
+export interface AppConfig {
+  theme: AppTheme;
+  pollIntervalSec: number;
+  servers: ServerConfig[];
+}
+
 export interface PingResult {
   serverId: string;
   latencyMs: number | null;

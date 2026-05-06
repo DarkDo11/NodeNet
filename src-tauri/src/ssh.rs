@@ -1,4 +1,4 @@
-use crate::config::ServerConfig;
+use crate::{config::ServerConfig, keychain};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -7,11 +7,15 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use tauri::AppHandle;
 use tokio::{net::TcpStream, process::Command, time::timeout};
 use uuid::Uuid;
 
 const KEYCHAIN_SERVICE: &str = "nodenet.ssh";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.ssh";
+const SSH_CONNECT_TIMEOUT_SECS: u64 = 8;
+const SSH_COMMAND_TIMEOUT_SECS: u64 = 28;
+const SSH_RETRY_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,35 +31,15 @@ pub fn keychain_account(server: &ServerConfig) -> String {
     format!("{}@{}:{}", server.ssh_user, server.host, server.ssh_port)
 }
 
-pub async fn save_password(server: &ServerConfig, password: &str) -> Result<()> {
+pub async fn save_password(app: &AppHandle, server: &ServerConfig, password: &str) -> Result<()> {
     let account = keychain_account(server);
-    let output = Command::new("security")
-        .arg("add-generic-password")
-        .arg("-U")
-        .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
-        .arg("-a")
-        .arg(account)
-        .arg("-w")
-        .arg(password)
-        .output()
-        .await
-        .context("failed to execute security add-generic-password")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "keychain write failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    Ok(())
+    keychain::save_password(app, KEYCHAIN_SERVICE, &account, password).await
 }
 
-pub async fn delete_password(server: &ServerConfig) -> Result<()> {
+pub async fn delete_password(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
-    let primary_result = delete_password_from_service(KEYCHAIN_SERVICE, &account).await;
-    let legacy_result = delete_password_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await;
+    let primary_result = keychain::delete_password(app, KEYCHAIN_SERVICE, &account).await;
+    let legacy_result = keychain::delete_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await;
 
     match (primary_result, legacy_result) {
         (Ok(()), _) | (_, Ok(())) => Ok(()),
@@ -63,60 +47,13 @@ pub async fn delete_password(server: &ServerConfig) -> Result<()> {
     }
 }
 
-async fn delete_password_from_service(service: &str, account: &str) -> Result<()> {
-    let output = Command::new("security")
-        .arg("delete-generic-password")
-        .arg("-s")
-        .arg(service)
-        .arg("-a")
-        .arg(account)
-        .output()
-        .await
-        .context("failed to execute security delete-generic-password")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("could not be found") {
-        return Ok(());
-    }
-
-    Err(anyhow!("keychain delete failed: {}", stderr.trim()))
-}
-
-pub async fn read_password(server: &ServerConfig) -> Result<Option<String>> {
+pub async fn read_password(app: &AppHandle, server: &ServerConfig) -> Result<Option<String>> {
     let account = keychain_account(server);
-    if let Some(password) = read_password_from_service(KEYCHAIN_SERVICE, &account).await? {
+    if let Some(password) = keychain::read_password(app, KEYCHAIN_SERVICE, &account).await? {
         return Ok(Some(password));
     }
 
-    read_password_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await
-}
-
-async fn read_password_from_service(service: &str, account: &str) -> Result<Option<String>> {
-    let output = Command::new("security")
-        .arg("find-generic-password")
-        .arg("-s")
-        .arg(service)
-        .arg("-a")
-        .arg(account)
-        .arg("-w")
-        .output()
-        .await
-        .context("failed to execute security find-generic-password")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if password.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(password))
-    }
+    keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await
 }
 
 pub async fn ping(server: &ServerConfig) -> PingResult {
@@ -158,9 +95,21 @@ pub async fn ping(server: &ServerConfig) -> PingResult {
     }
 }
 
-pub async fn execute(server: &ServerConfig, remote_command: &str) -> Result<String> {
+pub async fn execute(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+) -> Result<String> {
+    retry_ssh_operation(|| async { execute_once(app, server, remote_command).await }).await
+}
+
+async fn execute_once(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+) -> Result<String> {
     let password = if server.ssh_key_path.is_none() {
-        read_password(server).await?
+        read_password(app, server).await?
     } else {
         None
     };
@@ -178,7 +127,7 @@ pub async fn execute(server: &ServerConfig, remote_command: &str) -> Result<Stri
         .arg("-o")
         .arg("BatchMode=no")
         .arg("-o")
-        .arg("ConnectTimeout=8")
+        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
         .arg("ServerAliveInterval=5")
         .arg("-o")
@@ -208,7 +157,13 @@ pub async fn execute(server: &ServerConfig, remote_command: &str) -> Result<Stri
         .arg(format!("{}@{}", server.ssh_user, server.host))
         .arg(remote_command);
 
-    let output = command.output().await.context("failed to execute ssh")?;
+    let output = timeout(
+        Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .context("ssh command timed out")?
+    .context("failed to execute ssh")?;
 
     if let Some(path) = askpass_path {
         let _ = fs::remove_file(path);
@@ -225,6 +180,17 @@ pub async fn execute(server: &ServerConfig, remote_command: &str) -> Result<Stri
 }
 
 pub async fn download_file(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_path: &str,
+    local_path: &Path,
+) -> Result<()> {
+    retry_ssh_operation(|| async { download_file_once(app, server, remote_path, local_path).await })
+        .await
+}
+
+async fn download_file_once(
+    app: &AppHandle,
     server: &ServerConfig,
     remote_path: &str,
     local_path: &Path,
@@ -235,7 +201,7 @@ pub async fn download_file(
     }
 
     let password = if server.ssh_key_path.is_none() {
-        read_password(server).await?
+        read_password(app, server).await?
     } else {
         None
     };
@@ -263,7 +229,7 @@ pub async fn download_file(
         .arg("-o")
         .arg("BatchMode=no")
         .arg("-o")
-        .arg("ConnectTimeout=8")
+        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-b")
@@ -287,7 +253,13 @@ pub async fn download_file(
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
-    let output = command.output().await.context("failed to execute sftp")?;
+    let output = timeout(
+        Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .context("sftp download timed out")?
+    .context("failed to execute sftp")?;
 
     if let Some(path) = askpass_path {
         let _ = fs::remove_file(path);
@@ -302,6 +274,29 @@ pub async fn download_file(
     }
 
     Ok(())
+}
+
+async fn retry_ssh_operation<F, Fut, T>(mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = Duration::from_millis(450);
+    let mut last_error = None;
+
+    for attempt in 0..SSH_RETRY_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt + 1 < SSH_RETRY_ATTEMPTS => {
+                last_error = Some(error);
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(4));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("ssh operation failed")))
 }
 
 fn create_askpass_script() -> Result<PathBuf> {

@@ -20,6 +20,8 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default = "default_theme")]
+    pub theme: String,
     pub poll_interval_sec: u64,
     pub servers: Vec<ServerConfig>,
 }
@@ -27,20 +29,15 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            theme: default_theme(),
             poll_interval_sec: 10,
-            servers: vec![ServerConfig {
-                id: "de-1".to_string(),
-                name: "Germany 1".to_string(),
-                host: "1.2.3.4".to_string(),
-                ssh_port: 22,
-                ssh_user: "root".to_string(),
-                country: "DE".to_string(),
-                panel_url: Some("https://panel.example.com".to_string()),
-                panel_user: Some("admin".to_string()),
-                ssh_key_path: None,
-            }],
+            servers: Vec::new(),
         }
     }
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -94,6 +91,51 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     fs::write(&path, raw).with_context(|| format!("failed to write config {}", path.display()))?;
 
     Ok(())
+}
+
+pub fn upsert_server(mut server: ServerConfig) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    if server.id.trim().is_empty() {
+        server.id = uuid::Uuid::new_v4().simple().to_string();
+    }
+
+    if let Some(existing) = config
+        .servers
+        .iter_mut()
+        .find(|existing| existing.id == server.id)
+    {
+        *existing = server;
+    } else {
+        config.servers.push(server);
+    }
+
+    save_config(&config)?;
+    Ok(config)
+}
+
+pub fn delete_server(server_id: &str) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    config.servers.retain(|server| server.id != server_id);
+    save_config(&config)?;
+    Ok(config)
+}
+
+pub fn set_poll_interval(seconds: u64) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    config.poll_interval_sec = seconds.clamp(2, 120);
+    save_config(&config)?;
+    Ok(config)
+}
+
+pub fn set_theme(theme: String) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    config.theme = if theme == "system" || theme == "contrast" {
+        theme
+    } else {
+        "dark".to_string()
+    };
+    save_config(&config)?;
+    Ok(config)
 }
 
 pub fn find_server(server_id: &str) -> Result<ServerConfig> {

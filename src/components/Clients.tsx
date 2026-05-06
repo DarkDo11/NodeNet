@@ -61,7 +61,15 @@ export default function Clients({
         </button>
       </header>
 
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-state">
+          <div>
+            <strong>Clients unavailable</strong>
+            <span>{error}</span>
+          </div>
+          <button className="command-button" disabled={!inbound} onClick={onRefresh}>Retry</button>
+        </div>
+      ) : null}
 
       <section className="client-toolbar">
         <label className="field">
@@ -100,7 +108,16 @@ export default function Clients({
       </section>
 
       <section className="clients-grid">
-        {clients.map((client) => {
+        {isLoading && clients.length === 0
+          ? Array.from({ length: 6 }, (_, index) => (
+            <article key={index} className="client-card skeleton-card">
+              <span className="skeleton-line short" />
+              <span className="skeleton-line" />
+              <span className="skeleton-line tall" />
+              <span className="skeleton-line" />
+            </article>
+          ))
+          : clients.map((client) => {
           const used = client.up + client.down;
 
           return (
@@ -146,7 +163,10 @@ export default function Clients({
         })}
 
         {!isLoading && clients.length === 0 ? (
-          <div className="chart-empty">No clients loaded</div>
+          <div className="empty-state table-empty">
+            <span>No clients loaded</span>
+            <button className="command-button" disabled={!inbound} onClick={onRefresh}>Refresh</button>
+          </div>
         ) : null}
       </section>
     </main>

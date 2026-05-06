@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
+use tauri::AppHandle;
 
 const METRICS_SCRIPT: &str = r#"
 CPU=$(top -bn1 | awk '/Cpu\(s\)|%Cpu/ { for (i=1; i<=NF; i++) if ($i ~ /^id,?$/) { printf "%.2f", 100 - $(i-1); exit } }')
@@ -49,8 +50,8 @@ pub struct ServerMetrics {
     pub tx_bytes: u64,
 }
 
-pub async fn collect(server: &ServerConfig) -> Result<ServerMetrics> {
-    let output = ssh::execute(server, METRICS_SCRIPT).await?;
+pub async fn collect(app: &AppHandle, server: &ServerConfig) -> Result<ServerMetrics> {
+    let output = ssh::execute(app, server, METRICS_SCRIPT).await?;
     parse_metrics(&server.id, &output)
 }
 

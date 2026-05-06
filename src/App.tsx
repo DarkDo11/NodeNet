@@ -3,6 +3,7 @@ import Clients from "./components/Clients";
 import Dashboard from "./components/Dashboard";
 import EventsLog from "./components/EventsLog";
 import Inbounds from "./components/Inbounds";
+import Onboarding from "./components/Onboarding";
 import QrModal from "./components/QrModal";
 import Settings from "./components/Settings";
 import Sidebar, { type AppView } from "./components/Sidebar";
@@ -13,7 +14,7 @@ import { useEventsStore } from "./stores/eventsStore";
 import { useMetricsStore } from "./stores/metricsStore";
 import { useServerStore } from "./stores/serverStore";
 import { useThreeXStore } from "./stores/threeXStore";
-import type { MetricPoint, ThreeXClient } from "./types";
+import type { AppTheme, MetricPoint, ServerConfig, ThreeXClient } from "./types";
 
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>("dashboard");
@@ -21,8 +22,15 @@ export default function App() {
     servers,
     selectedServerId,
     statusById,
+    configPollIntervalSec,
+    theme,
+    isLoading: isLoadingServers,
     loadServers,
     selectServer,
+    upsertServer,
+    deleteServer,
+    savePollInterval,
+    saveTheme,
     pingAllServers,
   } = useServerStore();
   const {
@@ -101,6 +109,20 @@ export default function App() {
   }, [loadServers]);
 
   useEffect(() => {
+    setPollInterval(configPollIntervalSec);
+  }, [configPollIntervalSec, setPollInterval]);
+
+  useEffect(() => {
+    const resolvedTheme =
+      theme === "system"
+        ? window.matchMedia("(prefers-color-scheme: light)").matches
+          ? "dark"
+          : "dark"
+        : theme;
+    document.documentElement.dataset.theme = resolvedTheme;
+  }, [theme]);
+
+  useEffect(() => {
     void loadEvents();
     let cleanup: (() => void) | null = null;
     void attachAlertListeners().then((unlisten) => {
@@ -168,6 +190,22 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectServer, servers]);
 
+  const saveServer = async (server: ServerConfig) => {
+    await upsertServer(server);
+    selectServer(server.id);
+  };
+
+  const updatePollInterval = async (seconds: number) => {
+    setPollInterval(seconds);
+    await savePollInterval(seconds);
+  };
+
+  const updateTheme = async (nextTheme: AppTheme) => {
+    await saveTheme(nextTheme);
+  };
+
+  const showOnboarding = !isLoadingServers && servers.length === 0 && activeView !== "settings";
+
   return (
     <div className="app-shell">
       <Sidebar
@@ -198,7 +236,10 @@ export default function App() {
             if (selectedServerId) void downloadConfig(selectedServerId);
           }}
         />
-        {activeView === "dashboard" ? (
+        {showOnboarding ? (
+          <Onboarding onCreateServer={saveServer} />
+        ) : null}
+        {!showOnboarding && activeView === "dashboard" ? (
           <Dashboard
             server={selectedServer}
             metrics={selectedServerId ? metricsByServer[selectedServerId] : undefined}
@@ -206,9 +247,12 @@ export default function App() {
             status={selectedServerId ? statusById[selectedServerId] : undefined}
             error={selectedServerId ? errorByServer[selectedServerId] : undefined}
             isPolling={isPolling}
+            onRetry={() => {
+              if (selectedServerId) void fetchMetrics(selectedServerId);
+            }}
           />
         ) : null}
-        {activeView === "inbounds" ? (
+        {!showOnboarding && activeView === "inbounds" ? (
           <Inbounds
             server={selectedServer}
             inbounds={selectedInbounds}
@@ -230,7 +274,7 @@ export default function App() {
             }}
           />
         ) : null}
-        {activeView === "clients" ? (
+        {!showOnboarding && activeView === "clients" ? (
           <Clients
             server={selectedServer}
             inbound={selectedInbound}
@@ -270,8 +314,8 @@ export default function App() {
             }}
           />
         ) : null}
-        {activeView === "terminal" ? <TerminalView server={selectedServer} /> : null}
-        {activeView === "events" ? (
+        {!showOnboarding && activeView === "terminal" ? <TerminalView server={selectedServer} /> : null}
+        {!showOnboarding && activeView === "events" ? (
           <EventsLog
             events={events}
             error={eventsError}
@@ -280,11 +324,15 @@ export default function App() {
             }}
           />
         ) : null}
-        {activeView === "settings" ? (
+        {!showOnboarding && activeView === "settings" ? (
           <Settings
             servers={servers}
             pollIntervalSec={pollIntervalSec}
-            onPollIntervalChange={setPollInterval}
+            theme={theme}
+            onPollIntervalChange={updatePollInterval}
+            onThemeChange={updateTheme}
+            onSaveServer={saveServer}
+            onDeleteServer={deleteServer}
           />
         ) : null}
       </div>

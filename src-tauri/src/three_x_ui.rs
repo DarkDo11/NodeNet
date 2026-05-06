@@ -1,4 +1,4 @@
-use crate::{config, config::ServerConfig, ssh};
+use crate::{config, config::ServerConfig, keychain, ssh};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -6,7 +6,7 @@ use reqwest::{Client, Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, fs, time::Duration};
-use tokio::process::Command;
+use tauri::AppHandle;
 use uuid::Uuid;
 
 const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
@@ -112,67 +112,29 @@ struct RawClientTraffic {
     enable: Option<bool>,
 }
 
-pub async fn save_credentials(server: &ServerConfig, username: &str, password: &str) -> Result<()> {
+pub async fn save_credentials(
+    app: &AppHandle,
+    server: &ServerConfig,
+    username: &str,
+    password: &str,
+) -> Result<()> {
     let secret = serde_json::to_string(&PanelCredentials {
         username: username.trim().to_string(),
         password: password.to_string(),
     })
     .context("failed to serialize 3x-ui credentials")?;
-    let output = Command::new("security")
-        .arg("add-generic-password")
-        .arg("-U")
-        .arg("-s")
-        .arg(KEYCHAIN_SERVICE)
-        .arg("-a")
-        .arg(keychain_account(server))
-        .arg("-w")
-        .arg(secret)
-        .output()
-        .await
-        .context("failed to execute security add-generic-password")?;
-
-    if !output.status.success() {
-        bail!(
-            "3x-ui keychain write failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(())
+    keychain::save_password(app, KEYCHAIN_SERVICE, &keychain_account(server), &secret).await
 }
 
-pub async fn delete_credentials(server: &ServerConfig) -> Result<()> {
+pub async fn delete_credentials(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
-    let primary_result = delete_credentials_from_service(KEYCHAIN_SERVICE, &account).await;
-    let legacy_result = delete_credentials_from_service(LEGACY_KEYCHAIN_SERVICE, &account).await;
+    let primary_result = keychain::delete_password(app, KEYCHAIN_SERVICE, &account).await;
+    let legacy_result = keychain::delete_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await;
 
     match (primary_result, legacy_result) {
         (Ok(()), _) | (_, Ok(())) => Ok(()),
         (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
     }
-}
-
-async fn delete_credentials_from_service(service: &str, account: &str) -> Result<()> {
-    let output = Command::new("security")
-        .arg("delete-generic-password")
-        .arg("-s")
-        .arg(service)
-        .arg("-a")
-        .arg(account)
-        .output()
-        .await
-        .context("failed to execute security delete-generic-password")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("could not be found") {
-        return Ok(());
-    }
-
-    bail!("3x-ui keychain delete failed: {}", stderr.trim())
 }
 
 pub async fn login(url: &str, user: &str, pass: &str) -> Result<PanelSession> {
@@ -197,26 +159,31 @@ pub async fn login(url: &str, user: &str, pass: &str) -> Result<PanelSession> {
     })
 }
 
-pub async fn get_inbounds(server: &ServerConfig) -> Result<Vec<ThreeXInbound>> {
-    let mut session = PanelSession::for_server(server).await?;
+pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<ThreeXInbound>> {
+    let mut session = PanelSession::for_server(app, server).await?;
     let raw = get_raw_inbounds(&mut session).await?;
     Ok(raw.iter().map(map_inbound).collect())
 }
 
-pub async fn get_clients(server: &ServerConfig, inbound_id: i64) -> Result<Vec<ThreeXClient>> {
-    let mut session = PanelSession::for_server(server).await?;
+pub async fn get_clients(
+    app: &AppHandle,
+    server: &ServerConfig,
+    inbound_id: i64,
+) -> Result<Vec<ThreeXClient>> {
+    let mut session = PanelSession::for_server(app, server).await?;
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     Ok(map_clients(&inbound))
 }
 
 pub async fn add_client(
+    app: &AppHandle,
     server: &ServerConfig,
     inbound_id: i64,
     name: String,
     limit_gb: f64,
     expire_days: i64,
 ) -> Result<ThreeXClient> {
-    let mut session = PanelSession::for_server(server).await?;
+    let mut session = PanelSession::for_server(app, server).await?;
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     let client_id = Uuid::new_v4().to_string();
     let sub_id = Uuid::new_v4().simple().to_string();
@@ -280,11 +247,12 @@ pub async fn add_client(
 }
 
 pub async fn delete_client(
+    app: &AppHandle,
     server: &ServerConfig,
     inbound_id: i64,
     client_id: String,
 ) -> Result<()> {
-    let mut session = PanelSession::for_server(server).await?;
+    let mut session = PanelSession::for_server(app, server).await?;
     session
         .post_action(
             &format!(
@@ -298,11 +266,12 @@ pub async fn delete_client(
 }
 
 pub async fn reset_client_traffic(
+    app: &AppHandle,
     server: &ServerConfig,
     inbound_id: i64,
     client_id: String,
 ) -> Result<()> {
-    let mut session = PanelSession::for_server(server).await?;
+    let mut session = PanelSession::for_server(app, server).await?;
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     let client = find_client_value(&inbound, &client_id)?;
     let email = string_field(&client, "email").context("client email is missing")?;
@@ -320,6 +289,7 @@ pub async fn reset_client_traffic(
 }
 
 pub async fn extend_client(
+    app: &AppHandle,
     server: &ServerConfig,
     inbound_id: i64,
     client_id: String,
@@ -329,7 +299,7 @@ pub async fn extend_client(
         bail!("extend days must be positive");
     }
 
-    let mut session = PanelSession::for_server(server).await?;
+    let mut session = PanelSession::for_server(app, server).await?;
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     let mut client = find_client_value(&inbound, &client_id)?;
     let current_expiry = number_field(&client, "expiryTime").unwrap_or(0);
@@ -362,27 +332,33 @@ pub async fn extend_client(
 }
 
 pub async fn generate_link(
+    app: &AppHandle,
     server: &ServerConfig,
     inbound_id: i64,
     client_id: String,
 ) -> Result<String> {
-    let mut session = PanelSession::for_server(server).await?;
+    let mut session = PanelSession::for_server(app, server).await?;
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     let client = find_client_value(&inbound, &client_id)?;
     generate_link_for_client(server, &inbound, &client)
 }
 
-pub async fn restart_xray(server: &ServerConfig) -> Result<()> {
-    ssh::execute(server, "systemctl restart xray").await?;
+pub async fn restart_xray(app: &AppHandle, server: &ServerConfig) -> Result<()> {
+    ssh::execute(app, server, "systemctl restart xray").await?;
     Ok(())
 }
 
-pub async fn reboot_server(server: &ServerConfig) -> Result<()> {
-    ssh::execute(server, "nohup sh -c 'sleep 1; reboot' >/dev/null 2>&1 &").await?;
+pub async fn reboot_server(app: &AppHandle, server: &ServerConfig) -> Result<()> {
+    ssh::execute(
+        app,
+        server,
+        "nohup sh -c 'sleep 1; reboot' >/dev/null 2>&1 &",
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn download_config(server: &ServerConfig) -> Result<String> {
+pub async fn download_config(app: &AppHandle, server: &ServerConfig) -> Result<String> {
     let directory = config::config_dir()?.join("backups");
     fs::create_dir_all(&directory)
         .with_context(|| format!("failed to create backup directory {}", directory.display()))?;
@@ -392,17 +368,17 @@ pub async fn download_config(server: &ServerConfig) -> Result<String> {
         Utc::now().format("%Y%m%d-%H%M%S")
     );
     let path = directory.join(filename);
-    ssh::download_file(server, "/usr/local/x-ui/config.json", &path).await?;
+    ssh::download_file(app, server, "/usr/local/x-ui/config.json", &path).await?;
     Ok(path.display().to_string())
 }
 
 impl PanelSession {
-    async fn for_server(server: &ServerConfig) -> Result<Self> {
+    async fn for_server(app: &AppHandle, server: &ServerConfig) -> Result<Self> {
         let panel_url = server
             .panel_url
             .as_deref()
             .context("panelUrl is not configured for this server")?;
-        let credentials = read_credentials(server).await?;
+        let credentials = read_credentials(app, server).await?;
         login(panel_url, &credentials.username, &credentials.password).await
     }
 
@@ -549,11 +525,11 @@ async fn login_with_client(
     Ok(())
 }
 
-async fn read_credentials(server: &ServerConfig) -> Result<PanelCredentials> {
+async fn read_credentials(app: &AppHandle, server: &ServerConfig) -> Result<PanelCredentials> {
     let account = keychain_account(server);
-    let raw = match read_credentials_from_service(KEYCHAIN_SERVICE, &account).await? {
+    let raw = match keychain::read_password(app, KEYCHAIN_SERVICE, &account).await? {
         Some(raw) => raw,
-        None => read_credentials_from_service(LEGACY_KEYCHAIN_SERVICE, &account)
+        None => keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account)
             .await?
             .context("3x-ui password is not saved in Keychain")?,
     };
@@ -570,27 +546,6 @@ async fn read_credentials(server: &ServerConfig) -> Result<PanelCredentials> {
             .unwrap_or_else(|| "admin".to_string()),
         password: raw,
     })
-}
-
-async fn read_credentials_from_service(service: &str, account: &str) -> Result<Option<String>> {
-    let output = Command::new("security")
-        .arg("find-generic-password")
-        .arg("-s")
-        .arg(service)
-        .arg("-a")
-        .arg(account)
-        .arg("-w")
-        .output()
-        .await
-        .context("failed to execute security find-generic-password")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
 }
 
 async fn get_raw_inbounds(session: &mut PanelSession) -> Result<Vec<RawInbound>> {

@@ -9,6 +9,7 @@ import {
   SquareTerminal,
   Users,
 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
 export type AppView = "dashboard" | "inbounds" | "clients" | "terminal" | "events" | "settings";
@@ -110,19 +111,27 @@ export default function Sidebar({
       </div>
 
       <div className="server-list">
-        {servers.map((server) => {
+        <AnimatePresence initial={false}>
+          {servers.map((server) => {
           const status = statusById[server.id]?.status ?? "unknown";
           const latestMetrics = latestMetricsByServer[server.id];
           const cpuPercent = latestMetrics?.cpuPercent ?? 0;
+          const selected = selectedServerId === server.id;
 
           return (
-            <button
+            <motion.button
               key={server.id}
-              className={
-                selectedServerId === server.id ? "server-item selected" : "server-item"
-              }
+              layout
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -10 }}
+              transition={{ duration: 0.22 }}
+              className={selected ? "server-item selected" : "server-item"}
               onClick={() => onSelectServer(server.id)}
             >
+              {selected ? (
+                <motion.span className="server-selection-glow" layoutId="server-selection" />
+              ) : null}
               <span className="server-flag">{countryFlag(server.country)}</span>
               <span className="server-main">
                 <span className="server-name">{server.name}</span>
@@ -132,9 +141,10 @@ export default function Sidebar({
                 </span>
               </span>
               <span className={`status-dot ${status}`} />
-            </button>
+            </motion.button>
           );
         })}
+        </AnimatePresence>
 
         {servers.length === 0 ? (
           <div className="empty-server-list">

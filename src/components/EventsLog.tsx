@@ -22,7 +22,15 @@ export default function EventsLog({ events, error, onRefresh }: EventsLogProps) 
         </button>
       </header>
 
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-state">
+          <div>
+            <strong>Events unavailable</strong>
+            <span>{error}</span>
+          </div>
+          <button className="command-button" onClick={onRefresh}>Retry</button>
+        </div>
+      ) : null}
 
       <section className="events-panel">
         <div className="events-table header">
@@ -39,7 +47,11 @@ export default function EventsLog({ events, error, onRefresh }: EventsLogProps) 
             <span>{event.message}</span>
           </div>
         ))}
-        {events.length === 0 ? <div className="chart-empty">No events yet</div> : null}
+        {events.length === 0 ? (
+          <div className="empty-state table-empty">
+            <span>No events yet</span>
+          </div>
+        ) : null}
       </section>
     </main>
   );

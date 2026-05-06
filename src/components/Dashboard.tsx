@@ -23,6 +23,7 @@ interface DashboardProps {
   status: PingResult | undefined;
   error: string | undefined;
   isPolling: boolean;
+  onRetry: () => void;
 }
 
 const cardVariants = {
@@ -86,6 +87,22 @@ function MetricCard({
   );
 }
 
+function MetricSkeleton({ index }: { index: number }) {
+  return (
+    <motion.article
+      className="metric-card skeleton-card"
+      custom={index}
+      initial="hidden"
+      animate="visible"
+      variants={cardVariants}
+    >
+      <span className="skeleton-line short" />
+      <span className="skeleton-line tall" />
+      <span className="skeleton-line" />
+    </motion.article>
+  );
+}
+
 export default function Dashboard({
   server,
   metrics,
@@ -93,8 +110,10 @@ export default function Dashboard({
   status,
   error,
   isPolling,
+  onRetry,
 }: DashboardProps) {
   const point = latestPoint(history);
+  const showSkeletons = isPolling && !metrics;
 
   if (!server) {
     return (
@@ -136,57 +155,71 @@ export default function Dashboard({
         </div>
       </header>
 
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-state">
+          <div>
+            <strong>Metrics unavailable</strong>
+            <span>{error}</span>
+          </div>
+          <button className="command-button" onClick={onRetry}>Retry</button>
+        </div>
+      ) : null}
 
       <section className="metrics-grid">
-        <MetricCard
-          icon={<Cpu size={18} />}
-          label="CPU"
-          value={formatPercent(metrics?.cpuPercent)}
-          detail={`load ${metrics?.loadAverage.map((item) => item.toFixed(2)).join(" / ") ?? "0 / 0 / 0"}`}
-          accent="yellow"
-          index={0}
-        />
-        <MetricCard
-          icon={<MemoryStick size={18} />}
-          label="RAM"
-          value={formatPercent(metrics?.ramPercent)}
-          detail={`${metrics?.ramUsedMb ?? 0} MB of ${metrics?.ramTotalMb ?? 0} MB`}
-          accent="green"
-          index={1}
-        />
-        <MetricCard
-          icon={<HardDrive size={18} />}
-          label="Disk"
-          value={formatPercent(metrics?.diskPercent)}
-          detail={`${metrics?.diskUsed ?? "--"} of ${metrics?.diskTotal ?? "--"}`}
-          accent="blue"
-          index={2}
-        />
-        <MetricCard
-          icon={<Timer size={18} />}
-          label="Uptime"
-          value={metrics?.uptime ?? "--"}
-          detail={isPolling ? "polling" : "idle"}
-          accent="neutral"
-          index={3}
-        />
-        <MetricCard
-          icon={<ArrowDown size={18} />}
-          label="Down"
-          value={formatBits(point?.rxRateBps)}
-          detail={trafficDetail}
-          accent="green"
-          index={4}
-        />
-        <MetricCard
-          icon={<ArrowUp size={18} />}
-          label="Up"
-          value={formatBits(point?.txRateBps)}
-          detail={trafficDetail}
-          accent="red"
-          index={5}
-        />
+        {showSkeletons
+          ? Array.from({ length: 6 }, (_, index) => <MetricSkeleton key={index} index={index} />)
+          : (
+            <>
+              <MetricCard
+                icon={<Cpu size={18} />}
+                label="CPU"
+                value={formatPercent(metrics?.cpuPercent)}
+                detail={`load ${metrics?.loadAverage.map((item) => item.toFixed(2)).join(" / ") ?? "0 / 0 / 0"}`}
+                accent="yellow"
+                index={0}
+              />
+              <MetricCard
+                icon={<MemoryStick size={18} />}
+                label="RAM"
+                value={formatPercent(metrics?.ramPercent)}
+                detail={`${metrics?.ramUsedMb ?? 0} MB of ${metrics?.ramTotalMb ?? 0} MB`}
+                accent="green"
+                index={1}
+              />
+              <MetricCard
+                icon={<HardDrive size={18} />}
+                label="Disk"
+                value={formatPercent(metrics?.diskPercent)}
+                detail={`${metrics?.diskUsed ?? "--"} of ${metrics?.diskTotal ?? "--"}`}
+                accent="blue"
+                index={2}
+              />
+              <MetricCard
+                icon={<Timer size={18} />}
+                label="Uptime"
+                value={metrics?.uptime ?? "--"}
+                detail={isPolling ? "polling" : "idle"}
+                accent="neutral"
+                index={3}
+              />
+              <MetricCard
+                icon={<ArrowDown size={18} />}
+                label="Down"
+                value={formatBits(point?.rxRateBps)}
+                detail={trafficDetail}
+                accent="green"
+                index={4}
+              />
+              <MetricCard
+                icon={<ArrowUp size={18} />}
+                label="Up"
+                value={formatBits(point?.txRateBps)}
+                detail={trafficDetail}
+                accent="red"
+                index={5}
+              />
+            </>
+          )}
       </section>
 
       <section className="charts-grid">

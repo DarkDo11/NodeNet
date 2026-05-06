@@ -10,6 +10,8 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
+const TERMINAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 pub struct TerminalState {
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<TerminalCommand>>>,
@@ -152,7 +154,7 @@ async fn run_terminal_worker(
             "Opening SSH PTY",
         );
 
-        match connect_and_open_shell(&server, cols, rows).await {
+        match connect_and_open_shell(&app, &server, cols, rows).await {
             Ok(mut live) => {
                 reconnect_delay = Duration::from_secs(1);
                 emit_status(&app, &session_id, &server.id, "connected", "Connected");
@@ -234,6 +236,7 @@ enum LiveResult {
 }
 
 async fn connect_and_open_shell(
+    app: &AppHandle,
     server: &ServerConfig,
     cols: u32,
     rows: u32,
@@ -242,15 +245,24 @@ async fn connect_and_open_shell(
         inactivity_timeout: Some(Duration::from_secs(12)),
         ..Default::default()
     });
-    let mut session = client::connect(
-        config,
-        (server.host.as_str(), server.ssh_port),
-        TerminalClient,
+    let mut session = tokio::time::timeout(
+        TERMINAL_CONNECT_TIMEOUT,
+        client::connect(
+            config,
+            (server.host.as_str(), server.ssh_port),
+            TerminalClient,
+        ),
     )
     .await
+    .context("SSH terminal connection timed out")?
     .with_context(|| format!("failed to connect to {}:{}", server.host, server.ssh_port))?;
 
-    authenticate(&mut session, server).await?;
+    tokio::time::timeout(
+        TERMINAL_CONNECT_TIMEOUT,
+        authenticate(app, &mut session, server),
+    )
+    .await
+    .context("SSH terminal authentication timed out")??;
 
     let channel = session.channel_open_session().await?;
     channel
@@ -267,6 +279,7 @@ async fn connect_and_open_shell(
 }
 
 async fn authenticate(
+    app: &AppHandle,
     session: &mut client::Handle<TerminalClient>,
     server: &ServerConfig,
 ) -> Result<()> {
@@ -287,7 +300,7 @@ async fn authenticate(
         return Ok(());
     }
 
-    let password = ssh::read_password(server)
+    let password = ssh::read_password(&app, server)
         .await?
         .context("SSH password is not saved in Keychain")?;
     let accepted = session

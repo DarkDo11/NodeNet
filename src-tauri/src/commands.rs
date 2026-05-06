@@ -1,9 +1,14 @@
 use crate::{
-    config::{config_path, find_server, load_config, ServerConfig},
+    config::{
+        config_path, delete_server as delete_server_config, find_server, load_config, save_config,
+        set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
+        upsert_server as upsert_server_config, AppConfig, ServerConfig,
+    },
     metrics::{collect, ServerMetrics},
     ssh::{delete_password, ping, save_password, PingResult},
     three_x_ui::{self, ThreeXClient, ThreeXInbound},
 };
+use tauri::AppHandle;
 
 #[tauri::command]
 pub fn get_config_path() -> Result<String, String> {
@@ -20,9 +25,42 @@ pub fn get_servers() -> Result<Vec<ServerConfig>, String> {
 }
 
 #[tauri::command]
-pub async fn get_metrics(server_id: String) -> Result<ServerMetrics, String> {
+pub fn get_app_config() -> Result<AppConfig, String> {
+    load_config().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_app_config(config: AppConfig) -> Result<AppConfig, String> {
+    save_config(&config).map_err(|error| error.to_string())?;
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn upsert_server(server: ServerConfig) -> Result<AppConfig, String> {
+    upsert_server_config(server).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_server(server_id: String) -> Result<AppConfig, String> {
+    delete_server_config(&server_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_poll_interval(seconds: u64) -> Result<AppConfig, String> {
+    set_poll_interval_config(seconds).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_theme(theme: String) -> Result<AppConfig, String> {
+    set_theme_config(theme).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetrics, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    collect(&server).await.map_err(|error| error.to_string())
+    collect(&app, &server)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -32,59 +70,69 @@ pub async fn ping_server(server_id: String) -> Result<PingResult, String> {
 }
 
 #[tauri::command]
-pub async fn save_ssh_password(server_id: String, password: String) -> Result<(), String> {
+pub async fn save_ssh_password(
+    app: AppHandle,
+    server_id: String,
+    password: String,
+) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    save_password(&server, &password)
+    save_password(&app, &server, &password)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_ssh_password(server_id: String) -> Result<(), String> {
+pub async fn delete_ssh_password(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    delete_password(&server)
+    delete_password(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn save_three_x_ui_password(
+    app: AppHandle,
     server_id: String,
     username: String,
     password: String,
 ) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::save_credentials(&server, &username, &password)
+    three_x_ui::save_credentials(&app, &server, &username, &password)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_three_x_ui_password(server_id: String) -> Result<(), String> {
+pub async fn delete_three_x_ui_password(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::delete_credentials(&server)
+    three_x_ui::delete_credentials(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn get_inbounds(server_id: String) -> Result<Vec<ThreeXInbound>, String> {
+pub async fn get_inbounds(app: AppHandle, server_id: String) -> Result<Vec<ThreeXInbound>, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::get_inbounds(&server)
+    three_x_ui::get_inbounds(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn get_clients(server_id: String, inbound_id: i64) -> Result<Vec<ThreeXClient>, String> {
+pub async fn get_clients(
+    app: AppHandle,
+    server_id: String,
+    inbound_id: i64,
+) -> Result<Vec<ThreeXClient>, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::get_clients(&server, inbound_id)
+    three_x_ui::get_clients(&app, &server, inbound_id)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn add_client(
+    app: AppHandle,
     server_id: String,
     inbound_id: i64,
     name: String,
@@ -92,80 +140,84 @@ pub async fn add_client(
     expire_days: i64,
 ) -> Result<ThreeXClient, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::add_client(&server, inbound_id, name, limit_gb, expire_days)
+    three_x_ui::add_client(&app, &server, inbound_id, name, limit_gb, expire_days)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_client(
+    app: AppHandle,
     server_id: String,
     inbound_id: i64,
     client_id: String,
 ) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::delete_client(&server, inbound_id, client_id)
+    three_x_ui::delete_client(&app, &server, inbound_id, client_id)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn reset_client_traffic(
+    app: AppHandle,
     server_id: String,
     inbound_id: i64,
     client_id: String,
 ) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::reset_client_traffic(&server, inbound_id, client_id)
+    three_x_ui::reset_client_traffic(&app, &server, inbound_id, client_id)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn extend_client(
+    app: AppHandle,
     server_id: String,
     inbound_id: i64,
     client_id: String,
     days: i64,
 ) -> Result<ThreeXClient, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::extend_client(&server, inbound_id, client_id, days)
+    three_x_ui::extend_client(&app, &server, inbound_id, client_id, days)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn generate_client_link(
+    app: AppHandle,
     server_id: String,
     inbound_id: i64,
     client_id: String,
 ) -> Result<String, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::generate_link(&server, inbound_id, client_id)
+    three_x_ui::generate_link(&app, &server, inbound_id, client_id)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn restart_xray(server_id: String) -> Result<(), String> {
+pub async fn restart_xray(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::restart_xray(&server)
+    three_x_ui::restart_xray(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn reboot_server(server_id: String) -> Result<(), String> {
+pub async fn reboot_server(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::reboot_server(&server)
+    three_x_ui::reboot_server(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn download_config(server_id: String) -> Result<String, String> {
+pub async fn download_config(app: AppHandle, server_id: String) -> Result<String, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    three_x_ui::download_config(&server)
+    three_x_ui::download_config(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
