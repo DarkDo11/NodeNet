@@ -52,7 +52,7 @@ const formatBits = (bits = 0) => {
   return `${bits.toFixed(0)} b/s`;
 };
 
-const latestPoint = (history: MetricPoint[]) => history.at(-1);
+const latestPoint = (history: MetricPoint[]) => history[history.length - 1];
 
 function MetricCard({
   icon,

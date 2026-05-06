@@ -31,6 +31,9 @@ interface ThreeXState {
   ) => Promise<void>;
   deleteClient: (serverId: string, inboundId: number, clientId: string) => Promise<void>;
   resetClientTraffic: (serverId: string, inboundId: number, clientId: string) => Promise<void>;
+  resetAllExpired: (serverId: string, inboundId: number) => Promise<void>;
+  deleteAllDisabled: (serverId: string, inboundId: number) => Promise<void>;
+  exportClientsCsv: (serverId: string, inboundId: number) => Promise<void>;
   extendClient: (
     serverId: string,
     inboundId: number,
@@ -220,6 +223,48 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
       await invoke("reset_client_traffic", { serverId, inboundId, clientId });
       await get().loadClients(serverId, inboundId);
       set({ isRunningAction: false, actionMessage: "Traffic reset" });
+    } catch (error) {
+      set({
+        isRunningAction: false,
+        actionMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  resetAllExpired: async (serverId, inboundId) => {
+    set({ isRunningAction: true, actionMessage: "" });
+    try {
+      const count = await invoke<number>("reset_all_expired_clients", { serverId, inboundId });
+      await get().loadClients(serverId, inboundId);
+      set({ isRunningAction: false, actionMessage: `Reset ${count} expired clients` });
+    } catch (error) {
+      set({
+        isRunningAction: false,
+        actionMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  deleteAllDisabled: async (serverId, inboundId) => {
+    set({ isRunningAction: true, actionMessage: "" });
+    try {
+      const count = await invoke<number>("delete_all_disabled_clients", { serverId, inboundId });
+      await get().loadInbounds(serverId);
+      await get().loadClients(serverId, inboundId);
+      set({ isRunningAction: false, actionMessage: `Deleted ${count} disabled clients` });
+    } catch (error) {
+      set({
+        isRunningAction: false,
+        actionMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  exportClientsCsv: async (serverId, inboundId) => {
+    set({ isRunningAction: true, actionMessage: "" });
+    try {
+      const path = await invoke<string>("export_clients_csv", { serverId, inboundId });
+      set({ isRunningAction: false, actionMessage: `CSV exported: ${path}` });
     } catch (error) {
       set({
         isRunningAction: false,

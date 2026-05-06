@@ -15,11 +15,15 @@
       {
         "title": "NodeNet",
         "label": "main",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 980,
-        "minHeight": 640,
+        "width": 1200,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
         "decorations": true,
+        "windowEffects": {
+          "effects": ["sidebar"],
+          "state": "active"
+        },
         "transparent": true,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay",

@@ -46,7 +46,7 @@ export default function Topbar({
         <button className="icon-button" disabled={disabled} onClick={onReboot} title="Reboot server">
           <Power size={17} />
         </button>
-        <button className="icon-button" disabled={disabled} onClick={onBackup} title="Backup config">
+        <button className="icon-button" disabled={disabled} onClick={onBackup} title="Backup config to ~/Library/Application Support/NodeNet/backups/">
           <Archive size={17} />
         </button>
       </div>

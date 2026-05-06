@@ -10,6 +10,8 @@ export interface ServerConfig {
   panelUrl?: string | null;
   panelUser?: string | null;
   sshKeyPath?: string | null;
+  sshKeyPassphrase?: string | null;
+  sslVerify: boolean;
 }
 
 export type AppTheme = "dark" | "contrast" | "system";
@@ -104,6 +106,14 @@ export interface ToastMessage {
   id: string;
   level: "info" | "warn" | "error";
   message: string;
+}
+
+export interface TestConnectionResult {
+  ping: PingResult;
+  sshOk: boolean;
+  sshMessage: string;
+  panelOk: boolean | null;
+  panelMessage: string | null;
 }
 
 export interface TerminalStatusEvent {

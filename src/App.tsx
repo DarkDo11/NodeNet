@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import Clients from "./components/Clients";
+import ConfirmModal from "./components/ConfirmModal";
 import Dashboard from "./components/Dashboard";
 import EventsLog from "./components/EventsLog";
 import Inbounds from "./components/Inbounds";
@@ -37,10 +39,11 @@ export default function App() {
     metricsByServer,
     historyByServer,
     pollIntervalSec,
-    isPolling,
+    isPollingServer,
     errorByServer,
     setPollInterval,
     fetchMetrics,
+    loadMetricsCache,
   } = useMetricsStore();
   const {
     inboundsByServer,
@@ -60,6 +63,9 @@ export default function App() {
     addClient,
     deleteClient,
     resetClientTraffic,
+    resetAllExpired,
+    deleteAllDisabled,
+    exportClientsCsv,
     extendClient,
     generateClientLink,
     closeQr,
@@ -76,6 +82,12 @@ export default function App() {
     attachAlertListeners,
     dismissToast,
   } = useEventsStore();
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -86,7 +98,7 @@ export default function App() {
     return Object.fromEntries(
       Object.entries(historyByServer).map(([serverId, history]) => [
         serverId,
-        history.at(-1),
+        history[history.length - 1],
       ]),
     ) as Record<string, MetricPoint | undefined>;
   }, [historyByServer]);
@@ -106,21 +118,31 @@ export default function App() {
 
   useEffect(() => {
     void loadServers();
-  }, [loadServers]);
+    void loadMetricsCache();
+  }, [loadMetricsCache, loadServers]);
 
   useEffect(() => {
     setPollInterval(configPollIntervalSec);
   }, [configPollIntervalSec, setPollInterval]);
 
   useEffect(() => {
-    const resolvedTheme =
-      theme === "system"
-        ? window.matchMedia("(prefers-color-scheme: light)").matches
-          ? "dark"
-          : "dark"
-        : theme;
-    document.documentElement.dataset.theme = resolvedTheme;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolvedTheme = theme === "system" ? (media.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolvedTheme;
+    };
+
+    applyTheme();
+    if (theme !== "system") return;
+
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
   }, [theme]);
+
+  useEffect(() => {
+    const title = selectedServer ? `${selectedServer.name} — NodeNet` : "NodeNet";
+    void getCurrentWindow().setTitle(title);
+  }, [selectedServer]);
 
   useEffect(() => {
     void loadEvents();
@@ -206,6 +228,19 @@ export default function App() {
 
   const showOnboarding = !isLoadingServers && servers.length === 0 && activeView !== "settings";
 
+  if (isLoadingServers && servers.length === 0) {
+    return (
+      <main className="app-loading">
+        <section className="app-loading-panel">
+          <span className="skeleton-line short" />
+          <span className="skeleton-line tall" />
+          <span className="skeleton-line" />
+          <span className="skeleton-line" />
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className="app-shell">
       <Sidebar
@@ -230,7 +265,14 @@ export default function App() {
             if (selectedServerId) void restartXray(selectedServerId);
           }}
           onReboot={() => {
-            if (selectedServerId) void rebootServer(selectedServerId);
+            if (selectedServerId && selectedServer) {
+              setConfirm({
+                title: `Reboot ${selectedServer.name}?`,
+                message: `Reboot ${selectedServer.name}? All connections will drop.`,
+                confirmLabel: "Reboot",
+                onConfirm: () => void rebootServer(selectedServerId),
+              });
+            }
           }}
           onBackup={() => {
             if (selectedServerId) void downloadConfig(selectedServerId);
@@ -246,7 +288,7 @@ export default function App() {
             history={selectedServerId ? historyByServer[selectedServerId] ?? [] : []}
             status={selectedServerId ? statusById[selectedServerId] : undefined}
             error={selectedServerId ? errorByServer[selectedServerId] : undefined}
-            isPolling={isPolling}
+            isPolling={selectedServerId ? isPollingServer(selectedServerId) : false}
             onRetry={() => {
               if (selectedServerId) void fetchMetrics(selectedServerId);
             }}
@@ -299,7 +341,12 @@ export default function App() {
             }}
             onDelete={(client: ThreeXClient) => {
               if (selectedServerId && selectedInboundId !== null) {
-                void deleteClient(selectedServerId, selectedInboundId, client.id);
+                setConfirm({
+                  title: `Delete ${client.email}?`,
+                  message: `Delete ${client.email}? This cannot be undone.`,
+                  confirmLabel: "Delete client",
+                  onConfirm: () => void deleteClient(selectedServerId, selectedInboundId, client.id),
+                });
               }
             }}
             onExtend={(client: ThreeXClient, days) => {
@@ -312,9 +359,33 @@ export default function App() {
                 void generateClientLink(selectedServerId, selectedInboundId, client);
               }
             }}
+            onResetAllExpired={() => {
+              if (selectedServerId && selectedInboundId !== null) {
+                void resetAllExpired(selectedServerId, selectedInboundId);
+              }
+            }}
+            onDeleteAllDisabled={() => {
+              if (selectedServerId && selectedInboundId !== null) {
+                setConfirm({
+                  title: "Delete all disabled clients?",
+                  message: "Delete all disabled clients? This cannot be undone.",
+                  confirmLabel: "Delete disabled",
+                  onConfirm: () => void deleteAllDisabled(selectedServerId, selectedInboundId),
+                });
+              }
+            }}
+            onExportCsv={() => {
+              if (selectedServerId && selectedInboundId !== null) {
+                void exportClientsCsv(selectedServerId, selectedInboundId);
+              }
+            }}
           />
         ) : null}
-        {!showOnboarding && activeView === "terminal" ? <TerminalView server={selectedServer} /> : null}
+        {!showOnboarding ? (
+          <div className="view-slot" style={{ display: activeView === "terminal" ? "flex" : "none" }}>
+            <TerminalView server={selectedServer} />
+          </div>
+        ) : null}
         {!showOnboarding && activeView === "events" ? (
           <EventsLog
             events={events}
@@ -337,6 +408,19 @@ export default function App() {
         ) : null}
       </div>
       <QrModal title={qrTitle} link={qrLink} onClose={closeQr} />
+      {confirm ? (
+        <ConfirmModal
+          title={confirm.title}
+          message={confirm.message}
+          confirmLabel={confirm.confirmLabel}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => {
+            const action = confirm.onConfirm;
+            setConfirm(null);
+            action();
+          }}
+        />
+      ) : null}
       <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

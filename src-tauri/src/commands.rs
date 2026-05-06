@@ -5,10 +5,26 @@ use crate::{
         upsert_server as upsert_server_config, AppConfig, ServerConfig,
     },
     metrics::{collect, ServerMetrics},
-    ssh::{delete_password, ping, save_password, PingResult},
+    ssh::{
+        delete_key_passphrase, delete_password, ping, save_key_passphrase, save_password,
+        PingResult,
+    },
     three_x_ui::{self, ThreeXClient, ThreeXInbound},
 };
+use serde::Serialize;
+use serde_json::Value;
+use std::fs;
 use tauri::AppHandle;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConnectionResult {
+    pub ping: PingResult,
+    pub ssh_ok: bool,
+    pub ssh_message: String,
+    pub panel_ok: Option<bool>,
+    pub panel_message: Option<String>,
+}
 
 #[tauri::command]
 pub fn get_config_path() -> Result<String, String> {
@@ -85,6 +101,26 @@ pub async fn save_ssh_password(
 pub async fn delete_ssh_password(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
     delete_password(&app, &server)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_ssh_key_passphrase(
+    app: AppHandle,
+    server_id: String,
+    passphrase: String,
+) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    save_key_passphrase(&app, &server, &passphrase)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_ssh_key_passphrase(app: AppHandle, server_id: String) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    delete_key_passphrase(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
@@ -220,4 +256,113 @@ pub async fn download_config(app: AppHandle, server_id: String) -> Result<String
     three_x_ui::download_config(&app, &server)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn reset_all_expired_clients(
+    app: AppHandle,
+    server_id: String,
+    inbound_id: i64,
+) -> Result<usize, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::reset_all_expired_clients(&app, &server, inbound_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_all_disabled_clients(
+    app: AppHandle,
+    server_id: String,
+    inbound_id: i64,
+) -> Result<usize, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::delete_all_disabled_clients(&app, &server, inbound_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn export_clients_csv(
+    app: AppHandle,
+    server_id: String,
+    inbound_id: i64,
+) -> Result<String, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::export_clients_csv(&app, &server, inbound_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn test_server_connection(
+    app: AppHandle,
+    server: ServerConfig,
+    ssh_password: Option<String>,
+    ssh_key_passphrase: Option<String>,
+    panel_password: Option<String>,
+) -> Result<TestConnectionResult, String> {
+    if let Some(password) = ssh_password.filter(|value| !value.is_empty()) {
+        save_password(&app, &server, &password)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(passphrase) = ssh_key_passphrase.filter(|value| !value.is_empty()) {
+        save_key_passphrase(&app, &server, &passphrase)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(password) = panel_password.filter(|value| !value.is_empty()) {
+        three_x_ui::save_credentials(
+            &app,
+            &server,
+            server.panel_user.as_deref().unwrap_or("admin"),
+            &password,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    let ping_result = ping(&server).await;
+    let (ssh_ok, ssh_message) = match collect(&app, &server).await {
+        Ok(_) => (true, "SSH OK".to_string()),
+        Err(error) => (false, error.to_string()),
+    };
+    let (panel_ok, panel_message) = if server.panel_url.is_some() {
+        match three_x_ui::get_inbounds(&app, &server).await {
+            Ok(_) => (Some(true), Some("Panel OK".to_string())),
+            Err(error) => (Some(false), Some(error.to_string())),
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(TestConnectionResult {
+        ping: ping_result,
+        ssh_ok,
+        ssh_message,
+        panel_ok,
+        panel_message,
+    })
+}
+
+#[tauri::command]
+pub fn load_metrics_cache() -> Result<Value, String> {
+    let path = crate::config::config_dir()
+        .map_err(|error| error.to_string())?
+        .join("metrics-cache.json");
+    if !path.exists() {
+        return Ok(Value::Object(Default::default()));
+    }
+    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
+    let directory = crate::config::config_dir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("metrics-cache.json");
+    let raw = serde_json::to_string_pretty(&cache).map_err(|error| error.to_string())?;
+    fs::write(path, raw).map_err(|error| error.to_string())
 }

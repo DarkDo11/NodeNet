@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_EVENTS: usize = 500;
-const EVENTS_APP_DIR: &str = "vpnctrl";
+const EVENTS_APP_DIR: &str = "NodeNet";
 const EVENTS_KEYCHAIN_SERVICE: &str = "nodenet.events";
 const EVENTS_KEYCHAIN_ACCOUNT: &str = "events-aes-256-gcm";
 
@@ -86,113 +86,133 @@ pub fn start_alert_poller(app: AppHandle) {
 
 async fn poll_once(app: &AppHandle) -> Result<()> {
     let config = load_config()?;
+    let mut handles = Vec::with_capacity(config.servers.len());
 
     for server in config.servers {
-        let ping_result = ssh::ping(&server).await;
+        let app = app.clone();
+        handles.push(tauri::async_runtime::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), poll_server(&app, server)).await
+        }));
+    }
 
-        if ping_result.status == "offline" {
-            let should_emit = {
-                let state = app.state::<AlertsState>();
-                let mut runtime = state.runtime.lock().await;
-                runtime.down_servers.insert(server.id.clone())
-            };
-
-            if should_emit {
-                push_event(
-                    app,
-                    "error",
-                    "server_down",
-                    Some(server.id.clone()),
-                    Some(server.name.clone()),
-                    format!("{} is unavailable: {}", server.name, ping_result.message),
-                )
-                .await?;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                let _ = app.emit("alert-error", format!("server alert poll failed: {error}"));
             }
+            Ok(Err(_elapsed)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 
-            continue;
-        } else {
+    Ok(())
+}
+
+async fn poll_server(app: &AppHandle, server: crate::config::ServerConfig) -> Result<()> {
+    let ping_result = ssh::ping(&server).await;
+
+    if ping_result.status == "offline" {
+        let should_emit = {
             let state = app.state::<AlertsState>();
-            state.runtime.lock().await.down_servers.remove(&server.id);
+            let mut runtime = state.runtime.lock().await;
+            runtime.down_servers.insert(server.id.clone())
+        };
+
+        if should_emit {
+            push_event(
+                app,
+                "error",
+                "server_down",
+                Some(server.id.clone()),
+                Some(server.name.clone()),
+                format!("{} is unavailable: {}", server.name, ping_result.message),
+            )
+            .await?;
         }
 
-        if let Ok(sample) = metrics::collect(app, &server).await {
-            let mut event_to_emit = None;
-            {
-                let state = app.state::<AlertsState>();
-                let mut runtime = state.runtime.lock().await;
+        return Ok(());
+    } else {
+        let state = app.state::<AlertsState>();
+        state.runtime.lock().await.down_servers.remove(&server.id);
+    }
 
-                if sample.cpu_percent > 90.0 {
-                    let since = runtime
-                        .high_cpu_since
-                        .entry(server.id.clone())
-                        .or_insert_with(Instant::now);
-                    if since.elapsed() >= Duration::from_secs(60)
-                        && runtime.high_cpu_alerted.insert(server.id.clone())
-                    {
-                        event_to_emit = Some(format!(
-                            "{} CPU has been above 90% for more than 60 sec ({:.1}%)",
-                            server.name, sample.cpu_percent
-                        ));
-                    }
-                } else {
-                    runtime.high_cpu_since.remove(&server.id);
-                    runtime.high_cpu_alerted.remove(&server.id);
+    if let Ok(sample) = metrics::collect(app, &server).await {
+        let mut event_to_emit = None;
+        {
+            let state = app.state::<AlertsState>();
+            let mut runtime = state.runtime.lock().await;
+
+            if sample.cpu_percent > 90.0 {
+                let since = runtime
+                    .high_cpu_since
+                    .entry(server.id.clone())
+                    .or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_secs(60)
+                    && runtime.high_cpu_alerted.insert(server.id.clone())
+                {
+                    event_to_emit = Some(format!(
+                        "{} CPU has been above 90% for more than 60 sec ({:.1}%)",
+                        server.name, sample.cpu_percent
+                    ));
                 }
-            }
-
-            if let Some(message) = event_to_emit {
-                push_event(
-                    app,
-                    "warn",
-                    "cpu_high",
-                    Some(server.id.clone()),
-                    Some(server.name.clone()),
-                    message,
-                )
-                .await?;
+            } else {
+                runtime.high_cpu_since.remove(&server.id);
+                runtime.high_cpu_alerted.remove(&server.id);
             }
         }
 
-        if server.panel_url.is_some() {
-            let Ok(inbounds) = three_x_ui::get_inbounds(app, &server).await else {
+        if let Some(message) = event_to_emit {
+            push_event(
+                app,
+                "warn",
+                "cpu_high",
+                Some(server.id.clone()),
+                Some(server.name.clone()),
+                message,
+            )
+            .await?;
+        }
+    }
+
+    if server.panel_url.is_some() {
+        let Ok(inbounds) = three_x_ui::get_inbounds(app, &server).await else {
+            return Ok(());
+        };
+
+        for inbound in inbounds {
+            let Ok(clients) = three_x_ui::get_clients(app, &server, inbound.id).await else {
                 continue;
             };
 
-            for inbound in inbounds {
-                let Ok(clients) = three_x_ui::get_clients(app, &server, inbound.id).await else {
-                    continue;
+            for client in clients {
+                let used = client.up.saturating_add(client.down);
+                let client_key = format!("{}:{}:{}", server.id, inbound.id, client.id);
+                let over_limit = client.total > 0 && (used as f64 / client.total as f64) >= 0.95;
+                let should_emit = {
+                    let state = app.state::<AlertsState>();
+                    let mut runtime = state.runtime.lock().await;
+                    if over_limit {
+                        runtime.limited_clients.insert(client_key.clone())
+                    } else {
+                        runtime.limited_clients.remove(&client_key);
+                        false
+                    }
                 };
 
-                for client in clients {
-                    let used = client.up.saturating_add(client.down);
-                    let client_key = format!("{}:{}:{}", server.id, inbound.id, client.id);
-                    let over_limit =
-                        client.total > 0 && (used as f64 / client.total as f64) >= 0.95;
-                    let should_emit = {
-                        let state = app.state::<AlertsState>();
-                        let mut runtime = state.runtime.lock().await;
-                        if over_limit {
-                            runtime.limited_clients.insert(client_key.clone())
-                        } else {
-                            runtime.limited_clients.remove(&client_key);
-                            false
-                        }
-                    };
-
-                    if should_emit {
-                        push_event(
-                            app,
-                            "warn",
-                            "client_traffic_limit",
-                            Some(server.id.clone()),
-                            Some(server.name.clone()),
-                            format!(
-                                "{} used {:.1}% of traffic limit on {}",
-                                client.email, client.used_percent, server.name
-                            ),
-                        )
-                        .await?;
-                    }
+                if should_emit {
+                    push_event(
+                        app,
+                        "warn",
+                        "client_traffic_limit",
+                        Some(server.id.clone()),
+                        Some(server.name.clone()),
+                        format!(
+                            "{} used {:.1}% of traffic limit on {}",
+                            client.email, client.used_percent, server.name
+                        ),
+                    )
+                    .await?;
                 }
             }
         }

@@ -6,10 +6,12 @@ import {
   Save,
   ShieldCheck,
   SlidersHorizontal,
+  Wifi,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { AppTheme, ServerConfig } from "../types";
+import ConfirmModal from "./ConfirmModal";
+import type { AppTheme, ServerConfig, TestConnectionResult } from "../types";
 
 interface SettingsProps {
   servers: ServerConfig[];
@@ -31,6 +33,8 @@ const emptyServer = (): ServerConfig => ({
   panelUrl: "",
   panelUser: "admin",
   sshKeyPath: "",
+  sshKeyPassphrase: null,
+  sslVerify: false,
 });
 
 const slug = (value: string) =>
@@ -52,10 +56,13 @@ export default function Settings({
   const [selectedServerId, setSelectedServerId] = useState<string>("");
   const [form, setForm] = useState<ServerConfig>(emptyServer);
   const [password, setPassword] = useState("");
+  const [keyPassphrase, setKeyPassphrase] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
   const [configPath, setConfigPath] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -69,7 +76,7 @@ export default function Settings({
   }, [selectedServerId, servers]);
 
   useEffect(() => {
-    setForm(selectedServer ?? emptyServer());
+    setForm(selectedServer ? { ...emptyServer(), ...selectedServer } : emptyServer());
   }, [selectedServer]);
 
   useEffect(() => {
@@ -94,6 +101,8 @@ export default function Settings({
       panelUrl: form.panelUrl?.trim() || null,
       panelUser: form.panelUser?.trim() || "admin",
       sshKeyPath: form.sshKeyPath?.trim() || null,
+      sshKeyPassphrase: null,
+      sslVerify: form.sslVerify,
     };
 
     if (!server.name || !server.host || !server.sshUser) {
@@ -107,6 +116,40 @@ export default function Settings({
       setMessage("Server saved");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setError("");
+    setMessage("");
+    try {
+      const server = {
+        ...form,
+        id: form.id.trim() || slug(`${form.name}-${form.host}`) || crypto.randomUUID(),
+        name: form.name.trim(),
+        host: form.host.trim(),
+        sshUser: form.sshUser.trim(),
+        country: form.country.trim().toUpperCase() || "US",
+        panelUrl: form.panelUrl?.trim() || null,
+        panelUser: form.panelUser?.trim() || "admin",
+        sshKeyPath: form.sshKeyPath?.trim() || null,
+        sshKeyPassphrase: null,
+        sslVerify: form.sslVerify,
+      };
+      const result = await invoke<TestConnectionResult>("test_server_connection", {
+        server,
+        sshPassword: password || null,
+        sshKeyPassphrase: keyPassphrase || null,
+        panelPassword: panelPassword || null,
+      });
+      const ping = result.ping.latencyMs === null ? "Ping failed" : `${result.ping.latencyMs}ms`;
+      const panel = result.panelOk === null ? "" : ` / ${result.panelMessage}`;
+      setMessage(`${ping} / ${result.sshMessage}${panel}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -139,6 +182,25 @@ export default function Settings({
     await invoke("delete_ssh_password", { serverId: selectedServer.id });
     setPassword("");
     setMessage("SSH password removed from Keychain");
+  };
+
+  const saveKeyPassphrase = async () => {
+    if (!selectedServer || keyPassphrase.length === 0) return;
+
+    await invoke("save_ssh_key_passphrase", {
+      serverId: selectedServer.id,
+      passphrase: keyPassphrase,
+    });
+    setKeyPassphrase("");
+    setMessage("SSH key passphrase saved in Keychain");
+  };
+
+  const deleteKeyPassphrase = async () => {
+    if (!selectedServer) return;
+
+    await invoke("delete_ssh_key_passphrase", { serverId: selectedServer.id });
+    setKeyPassphrase("");
+    setMessage("SSH key passphrase removed from Keychain");
   };
 
   const savePanelPassword = async () => {
@@ -259,6 +321,10 @@ export default function Settings({
               <span>SSH key path</span>
               <input value={form.sshKeyPath ?? ""} onChange={(event) => updateForm("sshKeyPath", event.target.value)} placeholder="~/.ssh/server.pem" />
             </label>
+            <label className="field checkbox-field">
+              <span>Verify SSL</span>
+              <input type="checkbox" checked={form.sslVerify} onChange={(event) => updateForm("sslVerify", event.target.checked)} />
+            </label>
             <label className="field wide">
               <span>3x-ui panel URL</span>
               <input value={form.panelUrl ?? ""} onChange={(event) => updateForm("panelUrl", event.target.value)} />
@@ -274,7 +340,11 @@ export default function Settings({
               <Save size={16} />
               <span>Save server</span>
             </button>
-            <button className="command-button danger" disabled={!selectedServer} onClick={() => void removeServer()}>
+            <button className="command-button" disabled={testing} onClick={() => void testConnection()}>
+              <Wifi size={16} className={testing ? "spin" : ""} />
+              <span>{testing ? "Testing" : "Test"}</span>
+            </button>
+            <button className="command-button danger" disabled={!selectedServer} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={16} />
               <span>Delete server</span>
             </button>
@@ -301,6 +371,32 @@ export default function Settings({
               <span>Save</span>
             </button>
             <button className="command-button danger" disabled={!selectedServer} onClick={() => void deletePassword()}>
+              <Trash2 size={16} />
+              <span>Delete</span>
+            </button>
+          </div>
+        </article>
+
+        <article className="settings-panel">
+          <div className="settings-panel-header">
+            <KeyRound size={18} />
+            <h3>SSH Key Passphrase</h3>
+          </div>
+          <label className="field">
+            <span>Passphrase</span>
+            <input
+              type="password"
+              value={keyPassphrase}
+              onChange={(event) => setKeyPassphrase(event.target.value)}
+              placeholder="Private key secret"
+            />
+          </label>
+          <div className="settings-actions">
+            <button className="command-button" disabled={!selectedServer} onClick={() => void saveKeyPassphrase()}>
+              <Save size={16} />
+              <span>Save</span>
+            </button>
+            <button className="command-button danger" disabled={!selectedServer} onClick={() => void deleteKeyPassphrase()}>
               <Trash2 size={16} />
               <span>Delete</span>
             </button>
@@ -361,6 +457,18 @@ export default function Settings({
           </div>
         </article>
       </section>
+      {confirmDelete && selectedServer ? (
+        <ConfirmModal
+          title={`Delete ${selectedServer.name}?`}
+          message="This server and its saved configuration entry will be removed."
+          confirmLabel="Delete server"
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={() => {
+            setConfirmDelete(false);
+            void removeServer();
+          }}
+        />
+      ) : null}
     </main>
   );
 }

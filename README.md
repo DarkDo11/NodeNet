@@ -35,7 +35,7 @@ SSH and 3x-ui passwords are stored in macOS Keychain via `/usr/bin/security`.
 The events log is encrypted with AES-256-GCM and stored at:
 
 ```text
-~/Library/Application Support/vpnctrl/events.json
+~/Library/Application Support/NodeNet/events.json
 ```
 
 ## macOS DMG Build

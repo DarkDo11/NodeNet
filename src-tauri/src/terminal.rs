@@ -1,11 +1,16 @@
-use crate::{config::find_server, config::ServerConfig, ssh};
+use crate::{
+    config::{config_dir, find_server, ServerConfig},
+    ssh,
+    util::expand_tilde,
+};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use base64::{engine::general_purpose, Engine as _};
 use russh::client;
 use russh::keys::{key::PrivateKeyWithHashAlg, load_secret_key};
 use russh::{ChannelMsg, Disconnect};
-use serde::Serialize;
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -25,7 +30,10 @@ enum TerminalCommand {
 }
 
 #[derive(Debug, Clone)]
-struct TerminalClient;
+struct TerminalClient {
+    host_key: String,
+    known_hosts_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,11 +58,15 @@ impl client::Handler for TerminalClient {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
+        verify_known_host(&self.known_hosts_path, &self.host_key, server_public_key)?;
         Ok(true)
     }
 }
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct KnownHosts(HashMap<String, String>);
 
 #[tauri::command]
 pub async fn terminal_connect(
@@ -250,7 +262,10 @@ async fn connect_and_open_shell(
         client::connect(
             config,
             (server.host.as_str(), server.ssh_port),
-            TerminalClient,
+            TerminalClient {
+                host_key: terminal_host_key(server),
+                known_hosts_path: known_hosts_path()?,
+            },
         ),
     )
     .await
@@ -284,7 +299,8 @@ async fn authenticate(
     server: &ServerConfig,
 ) -> Result<()> {
     if let Some(key_path) = &server.ssh_key_path {
-        let private_key = load_secret_key(expand_tilde(key_path), None)
+        let passphrase = ssh::read_key_passphrase(app, server).await?;
+        let private_key = load_secret_key(expand_tilde(key_path), passphrase.as_deref())
             .with_context(|| format!("failed to load SSH key {}", key_path))?;
         let accepted = session
             .authenticate_publickey(
@@ -300,7 +316,7 @@ async fn authenticate(
         return Ok(());
     }
 
-    let password = ssh::read_password(&app, server)
+    let password = ssh::read_password(app, server)
         .await?
         .context("SSH password is not saved in Keychain")?;
     let accepted = session
@@ -400,12 +416,64 @@ fn emit_status(app: &AppHandle, session_id: &str, server_id: &str, status: &str,
     );
 }
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest).display().to_string();
+fn verify_known_host(
+    path: &PathBuf,
+    host_key: &str,
+    server_public_key: &russh::keys::ssh_key::PublicKey,
+) -> std::result::Result<(), russh::Error> {
+    let fingerprint = general_purpose::STANDARD.encode(
+        server_public_key
+            .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+            .as_ref(),
+    );
+    let mut known_hosts = read_known_hosts(path)?;
+
+    if let Some(stored_fingerprint) = known_hosts.0.get(host_key) {
+        if stored_fingerprint == &fingerprint {
+            return Ok(());
         }
+
+        return Err(russh::Error::KeyChanged { line: 0 });
     }
 
-    path.to_string()
+    known_hosts.0.insert(host_key.to_string(), fingerprint);
+    write_known_hosts(path, &known_hosts)?;
+
+    Ok(())
+}
+
+fn read_known_hosts(path: &PathBuf) -> std::result::Result<KnownHosts, russh::Error> {
+    if !path.exists() {
+        return Ok(KnownHosts::default());
+    }
+
+    let raw = fs::read_to_string(path)?;
+    Ok(serde_json::from_str::<KnownHosts>(&raw)
+        .or_else(|_| serde_json::from_str::<HashMap<String, String>>(&raw).map(KnownHosts))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?)
+}
+
+fn write_known_hosts(
+    path: &PathBuf,
+    known_hosts: &KnownHosts,
+) -> std::result::Result<(), russh::Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&known_hosts.0)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    )?;
+
+    Ok(())
+}
+
+fn known_hosts_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("known_hosts.json"))
+}
+
+fn terminal_host_key(server: &ServerConfig) -> String {
+    format!("{}:{}", server.host, server.ssh_port)
 }

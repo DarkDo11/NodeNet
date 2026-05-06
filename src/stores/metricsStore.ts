@@ -6,10 +6,12 @@ interface MetricsState {
   metricsByServer: Record<string, ServerMetrics>;
   historyByServer: Record<string, MetricPoint[]>;
   pollIntervalSec: number;
-  isPolling: boolean;
+  pollingServers: Set<string>;
   errorByServer: Record<string, string>;
   setPollInterval: (seconds: number) => void;
+  loadMetricsCache: () => Promise<void>;
   fetchMetrics: (serverId: string) => Promise<void>;
+  isPollingServer: (serverId: string) => boolean;
   clearMetricsError: (serverId: string) => void;
 }
 
@@ -53,46 +55,69 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
   metricsByServer: {},
   historyByServer: {},
   pollIntervalSec: 10,
-  isPolling: false,
+  pollingServers: new Set<string>(),
   errorByServer: {},
 
   setPollInterval: (seconds) =>
     set({ pollIntervalSec: Math.max(2, Math.round(seconds)) }),
 
+  loadMetricsCache: async () => {
+    try {
+      const historyByServer = await invoke<Record<string, MetricPoint[]>>("load_metrics_cache");
+      const metricsByServer = Object.fromEntries(
+        Object.entries(historyByServer).flatMap(([serverId, history]) => {
+          const latest = history[history.length - 1];
+          return latest ? [[serverId, latest]] : [];
+        }),
+      ) as Record<string, ServerMetrics>;
+      set({ historyByServer, metricsByServer });
+    } catch {
+      set({ historyByServer: {} });
+    }
+  },
+
   fetchMetrics: async (serverId) => {
-    set({ isPolling: true });
+    set((state) => {
+      const pollingServers = new Set(state.pollingServers);
+      pollingServers.add(serverId);
+      return { pollingServers };
+    });
 
     try {
       const metrics = await invoke<ServerMetrics>("get_metrics", { serverId });
       const previousHistory = get().historyByServer[serverId] ?? [];
-      const point = buildPoint(metrics, previousHistory.at(-1));
+      const point = buildPoint(metrics, previousHistory[previousHistory.length - 1]);
       const history = [...previousHistory, point].slice(-MAX_POINTS);
+      const historyByServer = {
+        ...get().historyByServer,
+        [serverId]: history,
+      };
 
       set((state) => ({
         metricsByServer: {
           ...state.metricsByServer,
           [serverId]: metrics,
         },
-        historyByServer: {
-          ...state.historyByServer,
-          [serverId]: history,
-        },
+        historyByServer,
         errorByServer: {
           ...state.errorByServer,
           [serverId]: "",
         },
-        isPolling: false,
+        pollingServers: withoutServer(state.pollingServers, serverId),
       }));
+      void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
     } catch (error) {
       set((state) => ({
         errorByServer: {
           ...state.errorByServer,
           [serverId]: error instanceof Error ? error.message : String(error),
         },
-        isPolling: false,
+        pollingServers: withoutServer(state.pollingServers, serverId),
       }));
     }
   },
+
+  isPollingServer: (serverId) => get().pollingServers.has(serverId),
 
   clearMetricsError: (serverId) =>
     set((state) => ({
@@ -102,3 +127,14 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
       },
     })),
 }));
+
+const withoutServer = (current: Set<string>, serverId: string) => {
+  const next = new Set(current);
+  next.delete(serverId);
+  return next;
+};
+
+const trimCache = (cache: Record<string, MetricPoint[]>) =>
+  Object.fromEntries(
+    Object.entries(cache).map(([serverId, history]) => [serverId, history.slice(-MAX_POINTS)]),
+  );

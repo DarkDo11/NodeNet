@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -15,6 +15,10 @@ pub struct ServerConfig {
     pub panel_url: Option<String>,
     pub panel_user: Option<String>,
     pub ssh_key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key_passphrase: Option<String>,
+    #[serde(default)]
+    pub ssl_verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,11 +133,12 @@ pub fn set_poll_interval(seconds: u64) -> Result<AppConfig> {
 
 pub fn set_theme(theme: String) -> Result<AppConfig> {
     let mut config = load_config()?;
-    config.theme = if theme == "system" || theme == "contrast" {
-        theme
-    } else {
-        "dark".to_string()
-    };
+    match theme.as_str() {
+        "dark" | "system" | "contrast" => {
+            config.theme = theme;
+        }
+        other => bail!("unknown theme '{other}', allowed: dark, system, contrast"),
+    }
     save_config(&config)?;
     Ok(config)
 }

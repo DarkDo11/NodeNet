@@ -107,19 +107,19 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
 }
 
 fn parse_f64(values: &HashMap<String, String>, key: &str) -> Result<f64> {
-    Ok(values
+    values
         .get(key)
         .with_context(|| format!("missing {key} metric"))?
         .parse::<f64>()
-        .with_context(|| format!("invalid {key} metric"))?)
+        .with_context(|| format!("invalid {key} metric"))
 }
 
 fn parse_u64(values: &HashMap<String, String>, key: &str) -> Result<u64> {
-    Ok(values
+    values
         .get(key)
         .with_context(|| format!("missing {key} metric"))?
         .parse::<u64>()
-        .with_context(|| format!("invalid {key} metric"))?)
+        .with_context(|| format!("invalid {key} metric"))
 }
 
 fn parse_load_average(raw: &str) -> Result<[f64; 3]> {

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Plus, ShieldCheck } from "lucide-react";
+import { KeyRound, Plus, ShieldCheck, Wifi } from "lucide-react";
 import { useState } from "react";
-import type { ServerConfig } from "../types";
+import type { ServerConfig, TestConnectionResult } from "../types";
 
 interface OnboardingProps {
   onCreateServer: (server: ServerConfig) => Promise<void>;
@@ -24,10 +24,13 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
   const [country, setCountry] = useState("DE");
   const [panelUrl, setPanelUrl] = useState("");
   const [panelUser, setPanelUser] = useState("admin");
+  const [sslVerify, setSslVerify] = useState(false);
   const [sshPassword, setSshPassword] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
   const [error, setError] = useState("");
+  const [testMessage, setTestMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   const submit = async () => {
     if (!name.trim() || !host.trim() || !sshUser.trim()) {
@@ -45,6 +48,8 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
       panelUrl: panelUrl.trim() || null,
       panelUser: panelUser.trim() || "admin",
       sshKeyPath: null,
+      sshKeyPassphrase: null,
+      sslVerify,
     };
 
     setSaving(true);
@@ -68,6 +73,41 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
     }
   };
 
+  const testConnection = async () => {
+    const server: ServerConfig = {
+      id: makeId(name, host),
+      name: name.trim(),
+      host: host.trim(),
+      sshPort,
+      sshUser: sshUser.trim(),
+      country: country.trim().toUpperCase() || "US",
+      panelUrl: panelUrl.trim() || null,
+      panelUser: panelUser.trim() || "admin",
+      sshKeyPath: null,
+      sshKeyPassphrase: null,
+      sslVerify,
+    };
+
+    setTesting(true);
+    setError("");
+    setTestMessage("");
+    try {
+      const result = await invoke<TestConnectionResult>("test_server_connection", {
+        server,
+        sshPassword: sshPassword || null,
+        sshKeyPassphrase: null,
+        panelPassword: panelPassword || null,
+      });
+      const ping = result.ping.latencyMs === null ? "Ping failed" : `${result.ping.latencyMs}ms`;
+      const panel = result.panelOk === null ? "" : ` / ${result.panelMessage}`;
+      setTestMessage(`${ping} / ${result.sshMessage}${panel}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <main className="onboarding-screen">
       <section className="onboarding-panel">
@@ -81,6 +121,7 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
         </div>
 
         {error ? <div className="error-state compact">{error}</div> : null}
+        {testMessage ? <p className="settings-message">{testMessage}</p> : null}
 
         <div className="settings-form-grid">
           <label className="field">
@@ -119,12 +160,22 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
             <span>Panel password</span>
             <input type="password" value={panelPassword} onChange={(event) => setPanelPassword(event.target.value)} />
           </label>
+          <label className="field checkbox-field">
+            <span>Verify SSL</span>
+            <input type="checkbox" checked={sslVerify} onChange={(event) => setSslVerify(event.target.checked)} />
+          </label>
         </div>
 
-        <button className="command-button primary" disabled={saving} onClick={() => void submit()}>
-          {saving ? <KeyRound size={16} className="spin" /> : <Plus size={16} />}
-          <span>{saving ? "Saving" : "Create server"}</span>
-        </button>
+        <div className="settings-actions">
+          <button className="command-button" disabled={testing || !host.trim()} onClick={() => void testConnection()}>
+            <Wifi size={16} className={testing ? "spin" : ""} />
+            <span>{testing ? "Testing" : "Test"}</span>
+          </button>
+          <button className="command-button primary" disabled={saving} onClick={() => void submit()}>
+            {saving ? <KeyRound size={16} className="spin" /> : <Plus size={16} />}
+            <span>{saving ? "Saving" : "Create server"}</span>
+          </button>
+        </div>
       </section>
     </main>
   );

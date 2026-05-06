@@ -39,7 +39,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   statusById: {},
   configPollIntervalSec: 10,
   theme: "dark",
-  isLoading: false,
+  isLoading: true,
   error: null,
 
   loadServers: async () => {
@@ -65,7 +65,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   deleteServer: async (serverId) => {
     const config = await invoke<AppConfig>("delete_server", { serverId });
-    set(applyConfig(config, get().selectedServerId === serverId ? null : get().selectedServerId));
+    set(applyConfig(
+      config,
+      get().selectedServerId === serverId ? config.servers[0]?.id ?? null : get().selectedServerId,
+    ));
   },
 
   savePollInterval: async (seconds) => {

@@ -2,16 +2,29 @@ use crate::{config, config::ServerConfig, keychain, ssh};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use directories::UserDirs;
 use reqwest::{Client, Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fs, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 use tauri::AppHandle;
+use tauri_plugin_opener::OpenerExt;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
+const SESSION_TTL: Duration = Duration::from_secs(25 * 60);
+
+type SessionCache = Mutex<HashMap<String, (PanelSession, Instant)>>;
+
+static SESSION_CACHE: LazyLock<SessionCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,11 +33,12 @@ struct PanelCredentials {
     password: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PanelSession {
     base_url: String,
     client: Client,
     credentials: PanelCredentials,
+    cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,11 +151,17 @@ pub async fn delete_credentials(app: &AppHandle, server: &ServerConfig) -> Resul
     }
 }
 
-pub async fn login(url: &str, user: &str, pass: &str) -> Result<PanelSession> {
+async fn login_with_ssl(
+    url: &str,
+    user: &str,
+    pass: &str,
+    ssl_verify: bool,
+    cache_key: Option<String>,
+) -> Result<PanelSession> {
     let base_url = normalize_panel_url(url)?;
     let client = Client::builder()
         .cookie_store(true)
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!ssl_verify)
         .timeout(Duration::from_secs(16))
         .build()
         .context("failed to create 3x-ui http client")?;
@@ -156,6 +176,7 @@ pub async fn login(url: &str, user: &str, pass: &str) -> Result<PanelSession> {
         base_url,
         client,
         credentials,
+        cache_key,
     })
 }
 
@@ -265,6 +286,44 @@ pub async fn delete_client(
         .await
 }
 
+pub async fn reset_all_expired_clients(
+    app: &AppHandle,
+    server: &ServerConfig,
+    inbound_id: i64,
+) -> Result<usize> {
+    let clients = get_clients(app, server, inbound_id).await?;
+    let expired = clients
+        .into_iter()
+        .filter(|client| client.status == "expired")
+        .collect::<Vec<_>>();
+    let total = expired.len();
+
+    for client in expired {
+        reset_client_traffic(app, server, inbound_id, client.id).await?;
+    }
+
+    Ok(total)
+}
+
+pub async fn delete_all_disabled_clients(
+    app: &AppHandle,
+    server: &ServerConfig,
+    inbound_id: i64,
+) -> Result<usize> {
+    let clients = get_clients(app, server, inbound_id).await?;
+    let disabled = clients
+        .into_iter()
+        .filter(|client| client.status == "disabled")
+        .collect::<Vec<_>>();
+    let total = disabled.len();
+
+    for client in disabled {
+        delete_client(app, server, inbound_id, client.id).await?;
+    }
+
+    Ok(total)
+}
+
 pub async fn reset_client_traffic(
     app: &AppHandle,
     server: &ServerConfig,
@@ -369,21 +428,94 @@ pub async fn download_config(app: &AppHandle, server: &ServerConfig) -> Result<S
     );
     let path = directory.join(filename);
     ssh::download_file(app, server, "/usr/local/x-ui/config.json", &path).await?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .context("failed to reveal backup in Finder")?;
+    Ok(path.display().to_string())
+}
+
+pub async fn export_clients_csv(
+    app: &AppHandle,
+    server: &ServerConfig,
+    inbound_id: i64,
+) -> Result<String> {
+    let clients = get_clients(app, server, inbound_id).await?;
+    let downloads = UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(|path| path.to_path_buf()))
+        .context("unable to resolve Downloads directory")?;
+    let path = downloads.join(format!(
+        "nodenet-clients-{}.csv",
+        Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    let mut csv = String::from("email,up,down,total,expiry,status\n");
+
+    for client in clients {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            csv_cell(&client.email),
+            client.up,
+            client.down,
+            client.total,
+            csv_cell(&client.expiry),
+            csv_cell(&client.status)
+        ));
+    }
+
+    fs::write(&path, csv).with_context(|| format!("failed to write {}", path.display()))?;
+    app.opener()
+        .open_path(path.display().to_string(), None::<String>)
+        .context("failed to open exported CSV")?;
     Ok(path.display().to_string())
 }
 
 impl PanelSession {
     async fn for_server(app: &AppHandle, server: &ServerConfig) -> Result<Self> {
+        let cache_key = server.id.clone();
+        let cached = { SESSION_CACHE.lock().await.get(&cache_key).cloned() };
+        if let Some((session, cached_at)) = cached {
+            if cached_at.elapsed() < SESSION_TTL {
+                return Ok(session);
+            }
+            SESSION_CACHE.lock().await.remove(&cache_key);
+        }
+
         let panel_url = server
             .panel_url
             .as_deref()
             .context("panelUrl is not configured for this server")?;
         let credentials = read_credentials(app, server).await?;
-        login(panel_url, &credentials.username, &credentials.password).await
+        let session = login_with_ssl(
+            panel_url,
+            &credentials.username,
+            &credentials.password,
+            server.ssl_verify,
+            Some(cache_key.clone()),
+        )
+        .await?;
+        SESSION_CACHE
+            .lock()
+            .await
+            .insert(cache_key, (session.clone(), Instant::now()));
+        Ok(session)
     }
 
     async fn relogin(&mut self) -> Result<()> {
         login_with_client(&self.client, &self.base_url, &self.credentials).await
+    }
+
+    async fn refresh_cache(&self) {
+        if let Some(cache_key) = &self.cache_key {
+            SESSION_CACHE
+                .lock()
+                .await
+                .insert(cache_key.clone(), (self.clone(), Instant::now()));
+        }
+    }
+
+    async fn invalidate_cache(&self) {
+        if let Some(cache_key) = &self.cache_key {
+            SESSION_CACHE.lock().await.remove(cache_key);
+        }
     }
 
     async fn get_obj<T>(&mut self, path: &str) -> Result<T>
@@ -408,7 +540,9 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
+                self.invalidate_cache().await;
                 self.relogin().await?;
+                self.refresh_cache().await;
                 continue;
             }
 
@@ -423,7 +557,9 @@ impl PanelSession {
             let envelope = parse_envelope::<Value>(&text)?;
             if envelope.success == Some(false) {
                 if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
+                    self.invalidate_cache().await;
                     self.relogin().await?;
+                    self.refresh_cache().await;
                     continue;
                 }
                 bail!(
@@ -456,7 +592,9 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
+                self.invalidate_cache().await;
                 self.relogin().await?;
+                self.refresh_cache().await;
                 continue;
             }
 
@@ -467,7 +605,9 @@ impl PanelSession {
             let envelope = parse_envelope::<T>(&text)?;
             if envelope.success == Some(false) {
                 if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
+                    self.invalidate_cache().await;
                     self.relogin().await?;
+                    self.refresh_cache().await;
                     continue;
                 }
                 bail!(
@@ -958,6 +1098,14 @@ fn keychain_account(server: &ServerConfig) -> String {
         server.id,
         server.panel_url.clone().unwrap_or_default()
     )
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 fn encode_component(input: &str) -> String {

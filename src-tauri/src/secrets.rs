@@ -6,6 +6,7 @@ use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 
 const SSH_SECRET_FIELDS: &[&str] = &["sshPassword", "sshPass", "ssh_password", "password"];
+const SSH_KEY_SECRET_FIELDS: &[&str] = &["sshKeyPassphrase", "ssh_key_passphrase"];
 const PANEL_SECRET_FIELDS: &[&str] = &[
     "panelPassword",
     "panelPass",
@@ -54,6 +55,11 @@ async fn migrate_file(app: &AppHandle, path: PathBuf) -> Result<()> {
 
             if let Some(password) = take_first_string(server_object, SSH_SECRET_FIELDS) {
                 ssh::save_password(app, &server, &password).await?;
+                changed = true;
+            }
+
+            if let Some(passphrase) = take_first_string(server_object, SSH_KEY_SECRET_FIELDS) {
+                ssh::save_key_passphrase(app, &server, &passphrase).await?;
                 changed = true;
             }
 
@@ -108,6 +114,7 @@ fn remove_legacy_plaintext_file_if_empty() -> Result<()> {
         .with_context(|| format!("failed to read {}", legacy_path.display()))?;
     if raw.contains("sshPassword")
         || raw.contains("panelPassword")
+        || raw.contains("sshKeyPassphrase")
         || raw.contains("threeXUiPassword")
         || raw.contains("\"password\"")
     {
