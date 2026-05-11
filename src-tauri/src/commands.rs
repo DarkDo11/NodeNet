@@ -6,15 +6,16 @@ use crate::{
     },
     metrics::{collect, ServerMetrics},
     ssh::{
-        delete_key_passphrase, delete_password, ping, save_key_passphrase, save_password,
-        PingResult,
+        self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
+        delete_password, ping, save_bastion_password as save_bastion_password_secret,
+        save_key_passphrase, save_password, PingResult,
     },
     three_x_ui::{self, ThreeXClient, ThreeXInbound},
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::fs;
-use tauri::AppHandle;
+use std::{fs, path::PathBuf};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +25,15 @@ pub struct TestConnectionResult {
     pub ssh_message: String,
     pub panel_ok: Option<bool>,
     pub panel_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelSetupInfo {
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub source: String,
 }
 
 #[tauri::command]
@@ -52,13 +62,17 @@ pub fn save_app_config(config: AppConfig) -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-pub fn upsert_server(server: ServerConfig) -> Result<AppConfig, String> {
-    upsert_server_config(server).map_err(|error| error.to_string())
+pub fn upsert_server(app: AppHandle, server: ServerConfig) -> Result<AppConfig, String> {
+    let config = upsert_server_config(server).map_err(|error| error.to_string())?;
+    let _ = app.emit("servers-changed", ());
+    Ok(config)
 }
 
 #[tauri::command]
-pub fn delete_server(server_id: String) -> Result<AppConfig, String> {
-    delete_server_config(&server_id).map_err(|error| error.to_string())
+pub fn delete_server(app: AppHandle, server_id: String) -> Result<AppConfig, String> {
+    let config = delete_server_config(&server_id).map_err(|error| error.to_string())?;
+    let _ = app.emit("servers-changed", ());
+    Ok(config)
 }
 
 #[tauri::command]
@@ -101,6 +115,26 @@ pub async fn save_ssh_password(
 pub async fn delete_ssh_password(app: AppHandle, server_id: String) -> Result<(), String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
     delete_password(&app, &server)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_bastion_password(
+    app: AppHandle,
+    server_id: String,
+    password: String,
+) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    save_bastion_password_secret(&app, &server, &password)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_bastion_password(app: AppHandle, server_id: String) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    delete_bastion_password_secret(&app, &server)
         .await
         .map_err(|error| error.to_string())
 }
@@ -300,6 +334,7 @@ pub async fn test_server_connection(
     server: ServerConfig,
     ssh_password: Option<String>,
     ssh_key_passphrase: Option<String>,
+    bastion_password: Option<String>,
     panel_password: Option<String>,
 ) -> Result<TestConnectionResult, String> {
     if let Some(password) = ssh_password.filter(|value| !value.is_empty()) {
@@ -309,6 +344,11 @@ pub async fn test_server_connection(
     }
     if let Some(passphrase) = ssh_key_passphrase.filter(|value| !value.is_empty()) {
         save_key_passphrase(&app, &server, &passphrase)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(password) = bastion_password.filter(|value| !value.is_empty()) {
+        save_bastion_password_secret(&app, &server, &password)
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -347,6 +387,157 @@ pub async fn test_server_connection(
 }
 
 #[tauri::command]
+pub async fn run_preset_command(
+    app: AppHandle,
+    server_id: String,
+    command: String,
+) -> Result<String, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    ssh::execute_combined(&app, &server, &command, 900)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn run_streaming_command(
+    app: AppHandle,
+    server_id: String,
+    command: String,
+    session_id: String,
+) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    ssh::execute_streaming_combined(&app, &server, &command, &session_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_xray_config(app: AppHandle, server_id: String) -> Result<Value, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::get_xray_config(&app, &server)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_xray_config(
+    app: AppHandle,
+    server_id: String,
+    config: Value,
+) -> Result<(), String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::save_xray_config(&app, &server, config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename = "get_panel_setup_info")]
+pub async fn get_panel_setup_info_command(
+    app: AppHandle,
+    server_id: String,
+) -> Result<PanelSetupInfo, String> {
+    let mut server = find_server(&server_id).map_err(|error| error.to_string())?;
+    let info = get_panel_setup_info(&app, &server)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut config = load_config().map_err(|error| error.to_string())?;
+    if let Some(existing) = config
+        .servers
+        .iter_mut()
+        .find(|existing| existing.id == server_id)
+    {
+        existing.panel_url = Some(format!("http://{}:{}", existing.host, info.port));
+        existing.panel_user = Some(info.username.clone());
+        server = existing.clone();
+    }
+    save_config(&config).map_err(|error| error.to_string())?;
+    if !info.password.is_empty() {
+        three_x_ui::save_credentials(&app, &server, &info.username, &info.password)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let _ = app.emit("servers-changed", ());
+
+    Ok(info)
+}
+
+pub async fn get_panel_setup_info(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> anyhow::Result<PanelSetupInfo> {
+    let output = ssh::execute_combined(app, server, "x-ui settings 2>&1 || true", 60).await?;
+    let mut info = parse_panel_setup_info(&output, "cli");
+    if !info.password.is_empty() {
+        return Ok(info);
+    }
+
+    let sqlite_username = read_xui_sqlite_setting(app, server, "webUsername").await?;
+    let sqlite_password = read_xui_sqlite_setting(app, server, "webPassword").await?;
+    let sqlite_port = read_xui_sqlite_setting(app, server, "webPort").await?;
+    if let Some(username) = sqlite_username {
+        info.username = username;
+    }
+    if let Some(port) = sqlite_port.and_then(|value| value.parse::<u16>().ok()) {
+        info.port = port;
+    }
+    if let Some(password) = sqlite_password {
+        info.password = password;
+        info.source = "sqlite".to_string();
+        return Ok(info);
+    }
+
+    let fallback_output = ssh::execute_combined(
+        app,
+        server,
+        "x-ui | grep -E \"(port|user|pass)\" 2>/dev/null || true",
+        60,
+    )
+    .await?;
+    let fallback_info = parse_panel_setup_info(&fallback_output, "fallback");
+    merge_panel_setup_info(&mut info, fallback_info);
+    if !info.password.is_empty() {
+        info.source = "fallback".to_string();
+        return Ok(info);
+    }
+
+    info.source = "default".to_string();
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn list_ssh_public_keys() -> Result<Vec<String>, String> {
+    let home = directories::BaseDirs::new()
+        .ok_or_else(|| "unable to resolve user directories".to_string())?
+        .home_dir()
+        .join(".ssh");
+    if !home.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = Vec::new();
+    for entry in fs::read_dir(home).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "pub")
+        {
+            keys.push(path.display().to_string());
+        }
+    }
+    keys.sort();
+    Ok(keys)
+}
+
+#[tauri::command]
+pub fn read_ssh_public_key(path: String) -> Result<String, String> {
+    let path = expand_public_key_path(&path)?;
+    fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn load_metrics_cache() -> Result<Value, String> {
     let path = crate::config::config_dir()
         .map_err(|error| error.to_string())?
@@ -365,4 +556,91 @@ pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
     let path = directory.join("metrics-cache.json");
     let raw = serde_json::to_string_pretty(&cache).map_err(|error| error.to_string())?;
     fs::write(path, raw).map_err(|error| error.to_string())
+}
+
+fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {
+    let mut port = None;
+    let mut username = None;
+    let mut password = None;
+
+    for line in output.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("port") {
+            port = port.or_else(|| first_u16(line));
+        }
+        if lower.contains("username") || lower.contains("user") {
+            username = username.or_else(|| value_after_separator(line));
+        }
+        if lower.contains("password") || lower.contains("pass") {
+            password = password.or_else(|| value_after_separator(line));
+        }
+    }
+
+    PanelSetupInfo {
+        port: port.unwrap_or(65333),
+        username: username.unwrap_or_else(|| "admin".to_string()),
+        password: password.unwrap_or_default(),
+        source: source.to_string(),
+    }
+}
+
+async fn read_xui_sqlite_setting(
+    app: &AppHandle,
+    server: &ServerConfig,
+    key: &str,
+) -> anyhow::Result<Option<String>> {
+    let command = format!(
+        "sqlite3 /etc/x-ui/x-ui.db \"SELECT value FROM settings WHERE key='{}' LIMIT 1;\" 2>/dev/null || true",
+        key.replace('\'', "''")
+    );
+    let output = ssh::execute_combined(app, server, &command, 60).await?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn merge_panel_setup_info(base: &mut PanelSetupInfo, candidate: PanelSetupInfo) {
+    if base.username == "admin" && candidate.username != "admin" {
+        base.username = candidate.username;
+    }
+    if base.port == 65333 && candidate.port != 65333 {
+        base.port = candidate.port;
+    }
+    if base.password.is_empty() && !candidate.password.is_empty() {
+        base.password = candidate.password;
+    }
+}
+
+fn value_after_separator(line: &str) -> Option<String> {
+    line.split_once(':')
+        .or_else(|| line.split_once('='))
+        .map(|(_, value)| {
+            value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn first_u16(line: &str) -> Option<u16> {
+    line.split(|character: char| !character.is_ascii_digit())
+        .filter(|value| !value.is_empty())
+        .find_map(|value| value.parse::<u16>().ok())
+}
+
+fn expand_public_key_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("SSH public key path is required".to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        let base_dirs = directories::BaseDirs::new()
+            .ok_or_else(|| "unable to resolve user directories".to_string())?;
+        return Ok(base_dirs.home_dir().join(rest));
+    }
+    Ok(PathBuf::from(trimmed))
 }

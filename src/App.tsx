@@ -7,6 +7,7 @@ import EventsLog from "./components/EventsLog";
 import Inbounds from "./components/Inbounds";
 import Onboarding from "./components/Onboarding";
 import QrModal from "./components/QrModal";
+import RoutingEditor from "./components/RoutingEditor";
 import Settings from "./components/Settings";
 import Sidebar, { type AppView } from "./components/Sidebar";
 import TerminalView from "./components/TerminalView";
@@ -20,6 +21,7 @@ import type { AppTheme, MetricPoint, ServerConfig, ThreeXClient } from "./types"
 
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [onboardingSetupServerId, setOnboardingSetupServerId] = useState<string | null>(null);
   const {
     servers,
     selectedServerId,
@@ -48,10 +50,13 @@ export default function App() {
   const {
     inboundsByServer,
     clientsByInbound,
+    xrayConfigByServer,
     selectedInboundIdByServer,
     errorByServer: panelErrorByServer,
     isLoadingInbounds,
     isLoadingClients,
+    isLoadingXrayConfig,
+    isSavingXrayConfig,
     isRunningAction,
     actionMessage,
     qrLink,
@@ -60,6 +65,8 @@ export default function App() {
     selectInbound,
     loadInbounds,
     loadClients,
+    loadXrayConfig,
+    saveXrayConfig,
     addClient,
     deleteClient,
     resetClientTraffic,
@@ -80,6 +87,7 @@ export default function App() {
     error: eventsError,
     loadEvents,
     attachAlertListeners,
+    pushToast,
     dismissToast,
   } = useEventsStore();
   const [confirm, setConfirm] = useState<{
@@ -185,6 +193,12 @@ export default function App() {
   }, [loadInbounds, selectedServer?.panelUrl, selectedServerId]);
 
   useEffect(() => {
+    if (activeView !== "routing" || !selectedServerId || !selectedServer?.panelUrl) return;
+
+    void loadXrayConfig(selectedServerId);
+  }, [activeView, loadXrayConfig, selectedServer?.panelUrl, selectedServerId]);
+
+  useEffect(() => {
     if (servers.length === 0) return;
 
     void refreshGlobalStats(servers);
@@ -226,7 +240,9 @@ export default function App() {
     await saveTheme(nextTheme);
   };
 
-  const showOnboarding = !isLoadingServers && servers.length === 0 && activeView !== "settings";
+  const showOnboarding =
+    (!isLoadingServers && servers.length === 0 && activeView !== "settings") ||
+    onboardingSetupServerId !== null;
 
   if (isLoadingServers && servers.length === 0) {
     return (
@@ -279,7 +295,14 @@ export default function App() {
           }}
         />
         {showOnboarding ? (
-          <Onboarding onCreateServer={saveServer} />
+          <Onboarding
+            onCreateServer={saveServer}
+            onSetupStarted={setOnboardingSetupServerId}
+            onFinishSetup={() => {
+              setOnboardingSetupServerId(null);
+              setActiveView("dashboard");
+            }}
+          />
         ) : null}
         {!showOnboarding && activeView === "dashboard" ? (
           <Dashboard
@@ -377,6 +400,28 @@ export default function App() {
             onExportCsv={() => {
               if (selectedServerId && selectedInboundId !== null) {
                 void exportClientsCsv(selectedServerId, selectedInboundId);
+              }
+            }}
+          />
+        ) : null}
+        {!showOnboarding && activeView === "routing" ? (
+          <RoutingEditor
+            server={selectedServer}
+            config={selectedServerId ? xrayConfigByServer[selectedServerId] ?? null : null}
+            error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
+            isLoading={isLoadingXrayConfig}
+            isSaving={isSavingXrayConfig}
+            onRefresh={() => {
+              if (selectedServerId) void loadXrayConfig(selectedServerId);
+            }}
+            onSave={async (config) => {
+              if (!selectedServerId) return;
+              try {
+                await saveXrayConfig(selectedServerId, config);
+                pushToast("info", "Xray routing saved");
+              } catch (error) {
+                pushToast("error", error instanceof Error ? error.message : String(error));
+                throw error;
               }
             }}
           />

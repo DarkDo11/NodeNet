@@ -10,6 +10,9 @@ export interface ServerConfig {
   panelUrl?: string | null;
   panelUser?: string | null;
   sshKeyPath?: string | null;
+  bastionHost?: string | null;
+  bastionPort?: number | null;
+  bastionUser?: string | null;
   sshKeyPassphrase?: string | null;
   sslVerify: boolean;
 }
@@ -108,12 +111,28 @@ export interface ToastMessage {
   message: string;
 }
 
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type XrayConfig = JsonObject;
+
 export interface TestConnectionResult {
   ping: PingResult;
   sshOk: boolean;
   sshMessage: string;
   panelOk: boolean | null;
   panelMessage: string | null;
+}
+
+export interface PanelSetupInfo {
+  port: number;
+  username: string;
+  password: string;
+  source: "cli" | "sqlite" | "fallback" | "default";
 }
 
 export interface TerminalStatusEvent {
@@ -127,4 +146,11 @@ export interface TerminalOutputEvent {
   sessionId: string;
   serverId: string;
   data: string;
+}
+
+export interface CommandOutputEvent {
+  sessionId: string;
+  serverId: string;
+  line: string;
+  done: boolean;
 }

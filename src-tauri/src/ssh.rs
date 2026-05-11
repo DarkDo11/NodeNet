@@ -1,21 +1,28 @@
 use crate::{config::ServerConfig, keychain, util::expand_tilde};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
-use tauri::AppHandle;
-use tokio::sync::Mutex;
-use tokio::{net::TcpStream, process::Command, time::timeout};
+use tauri::{AppHandle, Emitter};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    net::TcpStream,
+    process::Command,
+    sync::Mutex,
+    time::timeout,
+};
 use uuid::Uuid;
 
 const KEYCHAIN_SERVICE: &str = "nodenet.ssh";
 const KEYCHAIN_KEY_SERVICE: &str = "nodenet.ssh.key";
+const KEYCHAIN_BASTION_SERVICE: &str = "nodenet.ssh.bastion";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.ssh";
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 8;
 const SSH_COMMAND_TIMEOUT_SECS: u64 = 28;
@@ -42,8 +49,48 @@ pub struct PingResult {
     pub checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandOutputEvent {
+    pub session_id: String,
+    pub server_id: String,
+    pub line: String,
+    pub done: bool,
+}
+
 pub fn keychain_account(server: &ServerConfig) -> String {
     format!("{}@{}:{}", server.ssh_user, server.host, server.ssh_port)
+}
+
+pub fn bastion_keychain_account(server: &ServerConfig) -> Option<String> {
+    let host = server.bastion_host.as_ref()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+
+    let user = server
+        .bastion_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(server.ssh_user.as_str());
+    let port = server.bastion_port.unwrap_or(22);
+    Some(format!("{user}@{host}:{port}"))
+}
+
+pub fn cleanup_stale_sockets() {
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("nodenet-ssh-") && name.ends_with(".sock") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            if name.starts_with("nodenet-askpass-") && name.ends_with(".sh") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 pub async fn save_password(app: &AppHandle, server: &ServerConfig, password: &str) -> Result<()> {
@@ -69,6 +116,31 @@ pub async fn read_password(app: &AppHandle, server: &ServerConfig) -> Result<Opt
     }
 
     keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await
+}
+
+pub async fn save_bastion_password(
+    app: &AppHandle,
+    server: &ServerConfig,
+    password: &str,
+) -> Result<()> {
+    let account = bastion_keychain_account(server).context("bastion host is not configured")?;
+    keychain::save_password(app, KEYCHAIN_BASTION_SERVICE, &account, password).await
+}
+
+pub async fn delete_bastion_password(app: &AppHandle, server: &ServerConfig) -> Result<()> {
+    let account = bastion_keychain_account(server).context("bastion host is not configured")?;
+    keychain::delete_password(app, KEYCHAIN_BASTION_SERVICE, &account).await
+}
+
+pub async fn read_bastion_password(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Option<String>> {
+    let Some(account) = bastion_keychain_account(server) else {
+        return Ok(None);
+    };
+
+    keychain::read_password(app, KEYCHAIN_BASTION_SERVICE, &account).await
 }
 
 pub async fn save_key_passphrase(
@@ -102,7 +174,16 @@ pub async fn read_key_passphrase(app: &AppHandle, server: &ServerConfig) -> Resu
 pub async fn ping(server: &ServerConfig) -> PingResult {
     let checked_at = Utc::now();
     let started = Instant::now();
-    let address = (server.host.as_str(), server.ssh_port);
+    let bastion_host = server
+        .bastion_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let address = if let Some(host) = bastion_host {
+        (host, server.bastion_port.unwrap_or(22))
+    } else {
+        (server.host.as_str(), server.ssh_port)
+    };
 
     match timeout(Duration::from_secs(3), TcpStream::connect(address)).await {
         Ok(Ok(_stream)) => {
@@ -117,7 +198,11 @@ pub async fn ping(server: &ServerConfig) -> PingResult {
                 server_id: server.id.clone(),
                 latency_ms: Some(latency_ms),
                 status: status.to_string(),
-                message: "tcp ok".to_string(),
+                message: if bastion_host.is_some() {
+                    "bastion tcp ok".to_string()
+                } else {
+                    "tcp ok".to_string()
+                },
                 checked_at,
             }
         }
@@ -146,10 +231,46 @@ pub async fn execute(
     retry_ssh_operation(|| async { execute_once(app, server, remote_command).await }).await
 }
 
+pub async fn execute_combined(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    retry_ssh_operation(|| async {
+        execute_once_with_options(app, server, remote_command, timeout_secs, true).await
+    })
+    .await
+}
+
+pub async fn execute_streaming_combined(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+    session_id: &str,
+) -> Result<()> {
+    let result = execute_streaming_once(app, server, remote_command, session_id).await;
+    match &result {
+        Ok(()) => emit_command_output(app, server, session_id, "", true),
+        Err(error) => emit_command_output(app, server, session_id, &error.to_string(), true),
+    }
+    result
+}
+
 async fn execute_once(
     app: &AppHandle,
     server: &ServerConfig,
     remote_command: &str,
+) -> Result<String> {
+    execute_once_with_options(app, server, remote_command, SSH_COMMAND_TIMEOUT_SECS, false).await
+}
+
+async fn execute_once_with_options(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+    timeout_secs: u64,
+    include_stderr: bool,
 ) -> Result<String> {
     let connection = get_or_create_connection(app, server).await?;
     let control_path = {
@@ -186,26 +307,154 @@ async fn execute_once(
             .arg("IdentitiesOnly=yes");
     }
 
+    apply_bastion_proxy_jump(&mut command, server);
+
     command
         .arg(format!("{}@{}", server.ssh_user, server.host))
         .arg(remote_command);
 
-    let output = timeout(
-        Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
-        command.output(),
-    )
-    .await
-    .context("ssh command timed out")?
-    .context("failed to execute ssh")?;
+    let output = timeout(Duration::from_secs(timeout_secs), command.output())
+        .await
+        .context("ssh command timed out")?
+        .context("failed to execute ssh")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = if include_stderr && !stderr.trim().is_empty() {
+        format!("{stdout}{stderr}")
+    } else {
+        stdout.to_string()
+    };
 
     if !output.status.success() {
-        return Err(anyhow!(
-            "ssh command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(anyhow!("ssh command failed: {}", combined.trim()));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(combined)
+}
+
+async fn execute_streaming_once(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+    session_id: &str,
+) -> Result<()> {
+    let connection = get_or_create_connection(app, server).await?;
+    let control_path = {
+        let mut connection = connection.lock().await;
+        connection.last_used = Instant::now();
+        connection.control_path.clone()
+    };
+
+    let mut command = Command::new("ssh");
+    command
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("-p")
+        .arg(server.ssh_port.to_string())
+        .arg("-o")
+        .arg("BatchMode=no")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey,password")
+        .arg("-o")
+        .arg(format!("ControlPath={}", control_path.display()));
+
+    if let Some(key_path) = &server.ssh_key_path {
+        command
+            .arg("-i")
+            .arg(expand_tilde(key_path))
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+
+    apply_bastion_proxy_jump(&mut command, server);
+
+    command
+        .arg(format!("{}@{}", server.ssh_user, server.host))
+        .arg(remote_command);
+
+    let mut child = command.spawn().context("failed to execute ssh")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture ssh stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture ssh stderr")?;
+    let stdout_task = tokio::spawn(stream_command_output(
+        app.clone(),
+        server.clone(),
+        session_id.to_string(),
+        stdout,
+    ));
+    let stderr_task = tokio::spawn(stream_command_output(
+        app.clone(),
+        server.clone(),
+        session_id.to_string(),
+        stderr,
+    ));
+
+    let status = child.wait().await.context("failed to wait for ssh")?;
+    stdout_task
+        .await
+        .context("ssh stdout stream task failed")??;
+    stderr_task
+        .await
+        .context("ssh stderr stream task failed")??;
+
+    if !status.success() {
+        bail!("ssh command failed with status {status}");
+    }
+
+    Ok(())
+}
+
+async fn stream_command_output<R>(
+    app: AppHandle,
+    server: ServerConfig,
+    session_id: String,
+    stream: R,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("failed to read ssh output")?
+    {
+        emit_command_output(&app, &server, &session_id, &line, false);
+    }
+    Ok(())
+}
+
+fn emit_command_output(
+    app: &AppHandle,
+    server: &ServerConfig,
+    session_id: &str,
+    line: &str,
+    done: bool,
+) {
+    let _ = app.emit(
+        "command-output",
+        CommandOutputEvent {
+            session_id: session_id.to_string(),
+            server_id: server.id.clone(),
+            line: line.to_string(),
+            done,
+        },
+    );
 }
 
 pub async fn download_file(
@@ -271,6 +520,8 @@ async fn download_file_once(
             .arg("IdentitiesOnly=yes");
     }
 
+    apply_bastion_proxy_jump(&mut command, server);
+
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
     let output = timeout(
@@ -297,7 +548,7 @@ async fn get_or_create_connection(
     app: &AppHandle,
     server: &ServerConfig,
 ) -> Result<Arc<Mutex<SshConnection>>> {
-    let account = keychain_account(server);
+    let account = connection_pool_account(server);
     let existing = { SSH_POOL.lock().await.get(&account).cloned() };
     if let Some(connection) = existing {
         let alive = {
@@ -328,17 +579,22 @@ async fn get_or_create_connection(
     Ok(connection)
 }
 
+fn connection_pool_account(server: &ServerConfig) -> String {
+    match bastion_proxy_jump(server) {
+        Some(proxy_jump) => format!("{} via {proxy_jump}", keychain_account(server)),
+        None => keychain_account(server),
+    }
+}
+
 async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path) -> Result<()> {
-    let secret = if server.ssh_key_path.is_some() {
+    let target_secret = if server.ssh_key_path.is_some() {
         read_key_passphrase(app, server).await?
     } else {
         read_password(app, server).await?
     };
-    let askpass_path = if let Some(secret) = &secret {
-        Some(create_askpass_script(secret)?)
-    } else {
-        None
-    };
+    let bastion_secret = read_bastion_password(app, server).await?;
+    let askpass_path =
+        create_askpass_script(target_secret.as_deref(), bastion_secret.as_deref(), server)?;
 
     let mut command = Command::new("ssh");
     command
@@ -374,6 +630,8 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
             .arg("-o")
             .arg("IdentitiesOnly=yes");
     }
+
+    apply_bastion_proxy_jump(&mut command, server);
 
     if let Some(askpass_path) = &askpass_path {
         command
@@ -415,8 +673,9 @@ async fn is_connection_alive(server: &ServerConfig, control_path: &Path) -> bool
             .arg("-p")
             .arg(server.ssh_port.to_string())
             .arg("-o")
-            .arg(format!("ControlPath={}", control_path.display()))
-            .arg(format!("{}@{}", server.ssh_user, server.host));
+            .arg(format!("ControlPath={}", control_path.display()));
+        apply_bastion_proxy_jump(&mut command, server);
+        command.arg(format!("{}@{}", server.ssh_user, server.host));
         command.output().await
     })
     .await
@@ -438,8 +697,9 @@ async fn close_master(server: &ServerConfig, control_path: &Path) {
             .arg("-p")
             .arg(server.ssh_port.to_string())
             .arg("-o")
-            .arg(format!("ControlPath={}", control_path.display()))
-            .arg(format!("{}@{}", server.ssh_user, server.host));
+            .arg(format!("ControlPath={}", control_path.display()));
+        apply_bastion_proxy_jump(&mut command, server);
+        command.arg(format!("{}@{}", server.ssh_user, server.host));
         command.output().await
     })
     .await;
@@ -481,13 +741,28 @@ fn is_auth_error(error: &anyhow::Error) -> bool {
         || message.contains("publickey,password")
 }
 
-fn create_askpass_script(password: &str) -> Result<PathBuf> {
+fn create_askpass_script(
+    target_secret: Option<&str>,
+    bastion_secret: Option<&str>,
+    server: &ServerConfig,
+) -> Result<Option<PathBuf>> {
+    if target_secret.is_none() && bastion_secret.is_none() {
+        return Ok(None);
+    }
+
     let path = std::env::temp_dir().join(format!("nodenet-askpass-{}.sh", Uuid::new_v4()));
+    let bastion_account = bastion_keychain_account(server).unwrap_or_default();
+    let bastion_host = server.bastion_host.as_deref().unwrap_or_default();
+    let target_secret = target_secret.unwrap_or_default();
+    let bastion_secret = bastion_secret.unwrap_or(target_secret);
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' {}\n",
-            shell_single_quote(password)
+            "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *{}*|*{}*) printf '%s\\n' {} ;;\n  *) printf '%s\\n' {} ;;\nesac\n",
+            shell_case_pattern(&bastion_account),
+            shell_case_pattern(bastion_host),
+            shell_single_quote(bastion_secret),
+            shell_single_quote(target_secret)
         ),
     )
     .with_context(|| format!("failed to write askpass script {}", path.display()))?;
@@ -500,7 +775,42 @@ fn create_askpass_script(password: &str) -> Result<PathBuf> {
         fs::set_permissions(&path, permissions)?;
     }
 
-    Ok(path)
+    Ok(Some(path))
+}
+
+fn apply_bastion_proxy_jump(command: &mut Command, server: &ServerConfig) {
+    if let Some(proxy_jump) = bastion_proxy_jump(server) {
+        command.arg("-o").arg(format!("ProxyJump={proxy_jump}"));
+    }
+}
+
+fn bastion_proxy_jump(server: &ServerConfig) -> Option<String> {
+    let host = server
+        .bastion_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let user = server
+        .bastion_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(server.ssh_user.as_str());
+    let port = server.bastion_port.unwrap_or(22);
+
+    Some(format!("{user}@{host}:{port}"))
+}
+
+fn shell_case_pattern(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| match character {
+            '\\' | '*' | '?' | '[' | ']' => ['\\', character],
+            _ => ['\0', character],
+        })
+        .filter(|character| *character != '\0')
+        .collect()
 }
 
 fn sftp_quote(path: &str) -> String {

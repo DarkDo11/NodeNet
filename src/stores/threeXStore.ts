@@ -5,15 +5,19 @@ import type {
   ServerConfig,
   ThreeXClient,
   ThreeXInbound,
+  XrayConfig,
 } from "../types";
 
 interface ThreeXState {
   inboundsByServer: Record<string, ThreeXInbound[]>;
   clientsByInbound: Record<string, ThreeXClient[]>;
+  xrayConfigByServer: Record<string, XrayConfig>;
   selectedInboundIdByServer: Record<string, number | null>;
   errorByServer: Record<string, string>;
   isLoadingInbounds: boolean;
   isLoadingClients: boolean;
+  isLoadingXrayConfig: boolean;
+  isSavingXrayConfig: boolean;
   isRunningAction: boolean;
   actionMessage: string;
   qrLink: string | null;
@@ -22,6 +26,8 @@ interface ThreeXState {
   selectInbound: (serverId: string, inboundId: number) => void;
   loadInbounds: (serverId: string) => Promise<void>;
   loadClients: (serverId: string, inboundId: number) => Promise<void>;
+  loadXrayConfig: (serverId: string) => Promise<void>;
+  saveXrayConfig: (serverId: string, config: XrayConfig) => Promise<void>;
   addClient: (
     serverId: string,
     inboundId: number,
@@ -101,10 +107,13 @@ const statsFromTotals = (up: number, down: number): GlobalTrafficStats => {
 export const useThreeXStore = create<ThreeXState>((set, get) => ({
   inboundsByServer: {},
   clientsByInbound: {},
+  xrayConfigByServer: {},
   selectedInboundIdByServer: {},
   errorByServer: {},
   isLoadingInbounds: false,
   isLoadingClients: false,
+  isLoadingXrayConfig: false,
+  isSavingXrayConfig: false,
   isRunningAction: false,
   actionMessage: "",
   qrLink: null,
@@ -178,6 +187,61 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
         },
         isLoadingClients: false,
       }));
+    }
+  },
+
+  loadXrayConfig: async (serverId) => {
+    set({ isLoadingXrayConfig: true });
+    try {
+      const config = await invoke<XrayConfig>("get_xray_config", { serverId });
+      set((state) => ({
+        xrayConfigByServer: {
+          ...state.xrayConfigByServer,
+          [serverId]: config,
+        },
+        errorByServer: {
+          ...state.errorByServer,
+          [serverId]: "",
+        },
+        isLoadingXrayConfig: false,
+      }));
+    } catch (error) {
+      set((state) => ({
+        errorByServer: {
+          ...state.errorByServer,
+          [serverId]: error instanceof Error ? error.message : String(error),
+        },
+        isLoadingXrayConfig: false,
+      }));
+    }
+  },
+
+  saveXrayConfig: async (serverId, config) => {
+    set({ isSavingXrayConfig: true, actionMessage: "" });
+    try {
+      await invoke("save_xray_config", { serverId, config });
+      set((state) => ({
+        xrayConfigByServer: {
+          ...state.xrayConfigByServer,
+          [serverId]: config,
+        },
+        errorByServer: {
+          ...state.errorByServer,
+          [serverId]: "",
+        },
+        isSavingXrayConfig: false,
+        actionMessage: "Routing saved",
+      }));
+    } catch (error) {
+      set((state) => ({
+        errorByServer: {
+          ...state.errorByServer,
+          [serverId]: error instanceof Error ? error.message : String(error),
+        },
+        isSavingXrayConfig: false,
+        actionMessage: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
     }
   },
 

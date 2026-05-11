@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { KeyRound, Plus, ShieldCheck, Wifi } from "lucide-react";
 import { useState } from "react";
+import SetupPresets from "./SetupPresets";
 import type { ServerConfig, TestConnectionResult } from "../types";
 
 interface OnboardingProps {
   onCreateServer: (server: ServerConfig) => Promise<void>;
+  onSetupStarted?: (serverId: string) => void;
+  onFinishSetup?: () => void;
 }
 
 const makeId = (name: string, host: string) => {
@@ -16,7 +19,7 @@ const makeId = (name: string, host: string) => {
   return base || crypto.randomUUID();
 };
 
-export default function Onboarding({ onCreateServer }: OnboardingProps) {
+export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSetup }: OnboardingProps) {
   const [name, setName] = useState("Germany 1");
   const [host, setHost] = useState("");
   const [sshPort, setSshPort] = useState(22);
@@ -26,11 +29,34 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
   const [panelUser, setPanelUser] = useState("admin");
   const [sslVerify, setSslVerify] = useState(false);
   const [sshPassword, setSshPassword] = useState("");
+  const [useBastion, setUseBastion] = useState(false);
+  const [bastionHost, setBastionHost] = useState("");
+  const [bastionPort, setBastionPort] = useState(22);
+  const [bastionUser, setBastionUser] = useState("root");
+  const [bastionPassword, setBastionPassword] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
   const [error, setError] = useState("");
   const [testMessage, setTestMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [createdServer, setCreatedServer] = useState<ServerConfig | null>(null);
+
+  const buildServer = (): ServerConfig => ({
+    id: makeId(name, host),
+    name: name.trim(),
+    host: host.trim(),
+    sshPort,
+    sshUser: sshUser.trim(),
+    country: country.trim().toUpperCase() || "US",
+    panelUrl: panelUrl.trim() || null,
+    panelUser: panelUser.trim() || "admin",
+    sshKeyPath: null,
+    bastionHost: useBastion ? bastionHost.trim() || null : null,
+    bastionPort: useBastion ? bastionPort || 22 : null,
+    bastionUser: useBastion ? bastionUser.trim() || sshUser.trim() : null,
+    sshKeyPassphrase: null,
+    sslVerify,
+  });
 
   const submit = async () => {
     if (!name.trim() || !host.trim() || !sshUser.trim()) {
@@ -38,26 +64,18 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
       return;
     }
 
-    const server: ServerConfig = {
-      id: makeId(name, host),
-      name: name.trim(),
-      host: host.trim(),
-      sshPort,
-      sshUser: sshUser.trim(),
-      country: country.trim().toUpperCase() || "US",
-      panelUrl: panelUrl.trim() || null,
-      panelUser: panelUser.trim() || "admin",
-      sshKeyPath: null,
-      sshKeyPassphrase: null,
-      sslVerify,
-    };
+    const server = buildServer();
 
     setSaving(true);
     setError("");
     try {
+      onSetupStarted?.(server.id);
       await onCreateServer(server);
       if (sshPassword) {
         await invoke("save_ssh_password", { serverId: server.id, password: sshPassword });
+      }
+      if (bastionPassword) {
+        await invoke("save_bastion_password", { serverId: server.id, password: bastionPassword });
       }
       if (panelPassword) {
         await invoke("save_three_x_ui_password", {
@@ -66,7 +84,9 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
           password: panelPassword,
         });
       }
+      setCreatedServer(server);
     } catch (err) {
+      onFinishSetup?.();
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
@@ -74,19 +94,7 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
   };
 
   const testConnection = async () => {
-    const server: ServerConfig = {
-      id: makeId(name, host),
-      name: name.trim(),
-      host: host.trim(),
-      sshPort,
-      sshUser: sshUser.trim(),
-      country: country.trim().toUpperCase() || "US",
-      panelUrl: panelUrl.trim() || null,
-      panelUser: panelUser.trim() || "admin",
-      sshKeyPath: null,
-      sshKeyPassphrase: null,
-      sslVerify,
-    };
+    const server = buildServer();
 
     setTesting(true);
     setError("");
@@ -96,6 +104,7 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
         server,
         sshPassword: sshPassword || null,
         sshKeyPassphrase: null,
+        bastionPassword: bastionPassword || null,
         panelPassword: panelPassword || null,
       });
       const ping = result.ping.latencyMs === null ? "Ping failed" : `${result.ping.latencyMs}ms`;
@@ -107,6 +116,26 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
       setTesting(false);
     }
   };
+
+  if (createdServer) {
+    return (
+      <main className="onboarding-screen">
+        <section className="onboarding-panel">
+          <div>
+            <p className="eyebrow">First launch</p>
+            <h2>Setup presets</h2>
+            <span className="server-target">{createdServer.name}</span>
+          </div>
+          <SetupPresets server={createdServer} onDone={onFinishSetup} />
+          <div className="settings-actions">
+            <button className="command-button" onClick={onFinishSetup}>
+              <span>Skip presets</span>
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="onboarding-screen">
@@ -166,6 +195,32 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
           </label>
         </div>
 
+        <details className="settings-subsection">
+          <summary>Bastion / Jump Host</summary>
+          <div className="settings-form-grid">
+            <label className="field checkbox-field">
+              <span>Connect via bastion</span>
+              <input type="checkbox" checked={useBastion} onChange={(event) => setUseBastion(event.target.checked)} />
+            </label>
+            <label className="field">
+              <span>Host</span>
+              <input value={bastionHost} onChange={(event) => setBastionHost(event.target.value)} placeholder="bastion.example.com" />
+            </label>
+            <label className="field">
+              <span>Port</span>
+              <input type="number" min={1} max={65535} value={bastionPort} onChange={(event) => setBastionPort(Number(event.target.value))} />
+            </label>
+            <label className="field">
+              <span>User</span>
+              <input value={bastionUser} onChange={(event) => setBastionUser(event.target.value)} />
+            </label>
+            <label className="field wide">
+              <span>Bastion password</span>
+              <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} />
+            </label>
+          </div>
+        </details>
+
         <div className="settings-actions">
           <button className="command-button" disabled={testing || !host.trim()} onClick={() => void testConnection()}>
             <Wifi size={16} className={testing ? "spin" : ""} />
@@ -173,7 +228,7 @@ export default function Onboarding({ onCreateServer }: OnboardingProps) {
           </button>
           <button className="command-button primary" disabled={saving} onClick={() => void submit()}>
             {saving ? <KeyRound size={16} className="spin" /> : <Plus size={16} />}
-            <span>{saving ? "Saving" : "Create server"}</span>
+            <span>{saving ? "Saving" : "Continue to presets"}</span>
           </button>
         </div>
       </section>

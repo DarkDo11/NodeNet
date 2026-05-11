@@ -9,6 +9,7 @@ interface EventsState {
   error: string | null;
   loadEvents: () => Promise<void>;
   attachAlertListeners: () => Promise<() => void>;
+  pushToast: (level: ToastMessage["level"], message: string) => void;
   dismissToast: (toastId: string) => void;
 }
 
@@ -53,6 +54,15 @@ export const useEventsStore = create<EventsState>((set) => ({
       unlistenEvent();
       unlistenError();
     };
+  },
+
+  pushToast: (level, message) => {
+    const toast: ToastMessage = {
+      id: crypto.randomUUID(),
+      level,
+      message,
+    };
+    set((state) => ({ toasts: [toast, ...state.toasts].slice(0, 5) }));
   },
 
   dismissToast: (toastId) =>

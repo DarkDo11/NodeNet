@@ -7,11 +7,14 @@ mod secrets;
 mod ssh;
 mod terminal;
 mod three_x_ui;
+mod tray;
 mod util;
 
-use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Listener, WindowEvent};
 
 fn main() {
+    ssh::cleanup_stale_sockets();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
@@ -25,7 +28,11 @@ fn main() {
             }
         })
         .setup(|app| {
-            build_tray(app)?;
+            tray::build_tray(app.handle())?;
+            let tray_app_handle = app.handle().clone();
+            app.listen("servers-changed", move |_| {
+                let _ = tray::rebuild_tray_for_app(&tray_app_handle);
+            });
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = secrets::migrate_plaintext_config_secrets(&app_handle).await {
@@ -54,6 +61,8 @@ fn main() {
             commands::ping_server,
             commands::save_ssh_password,
             commands::delete_ssh_password,
+            commands::save_bastion_password,
+            commands::delete_bastion_password,
             commands::save_ssh_key_passphrase,
             commands::delete_ssh_key_passphrase,
             commands::save_three_x_ui_password,
@@ -72,8 +81,16 @@ fn main() {
             commands::delete_all_disabled_clients,
             commands::export_clients_csv,
             commands::test_server_connection,
+            commands::run_preset_command,
+            commands::run_streaming_command,
+            commands::get_xray_config,
+            commands::save_xray_config,
+            commands::get_panel_setup_info_command,
+            commands::list_ssh_public_keys,
+            commands::read_ssh_public_key,
             commands::load_metrics_cache,
             commands::save_metrics_cache,
+            tray::rebuild_tray,
             terminal::terminal_connect,
             terminal::terminal_input,
             terminal::terminal_resize,
@@ -82,49 +99,4 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NodeNet");
-}
-
-fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let mut menu = MenuBuilder::new(app)
-        .text("show", "Show NodeNet")
-        .separator();
-
-    if let Ok(config) = config::load_config() {
-        for server in config.servers {
-            menu = menu.text(
-                format!("server-{}", server.id),
-                format!("* {}", server.name),
-            );
-        }
-    }
-
-    let menu = menu.separator().text("quit", "Quit").build()?;
-    let icon = app.default_window_icon().cloned();
-    let mut tray = TrayIconBuilder::new()
-        .menu(&menu)
-        .tooltip("NodeNet")
-        .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| {
-            let id = event.id().as_ref();
-            if id == "show" {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            } else if id == "quit" {
-                app.exit(0);
-            } else if id.starts_with("server-") {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-        });
-
-    if let Some(icon) = icon {
-        tray = tray.icon(icon);
-    }
-
-    tray.build(app)?;
-    Ok(())
 }

@@ -178,6 +178,11 @@ async fn run_terminal_worker(
                             .session
                             .disconnect(Disconnect::ByApplication, "", "en")
                             .await;
+                        if let Some(bastion_session) = &mut live.bastion_session {
+                            let _ = bastion_session
+                                .disconnect(Disconnect::ByApplication, "", "en")
+                                .await;
+                        }
                         emit_status(
                             &app,
                             &session_id,
@@ -233,6 +238,7 @@ async fn run_terminal_worker(
 
 struct LiveTerminal {
     session: client::Handle<TerminalClient>,
+    bastion_session: Option<client::Handle<TerminalClient>>,
     channel: russh::Channel<client::Msg>,
     cols: u32,
     rows: u32,
@@ -257,20 +263,7 @@ async fn connect_and_open_shell(
         inactivity_timeout: Some(Duration::from_secs(12)),
         ..Default::default()
     });
-    let mut session = tokio::time::timeout(
-        TERMINAL_CONNECT_TIMEOUT,
-        client::connect(
-            config,
-            (server.host.as_str(), server.ssh_port),
-            TerminalClient {
-                host_key: terminal_host_key(server),
-                known_hosts_path: known_hosts_path()?,
-            },
-        ),
-    )
-    .await
-    .context("SSH terminal connection timed out")?
-    .with_context(|| format!("failed to connect to {}:{}", server.host, server.ssh_port))?;
+    let (mut session, bastion_session) = connect_terminal_session(app, server, config).await?;
 
     tokio::time::timeout(
         TERMINAL_CONNECT_TIMEOUT,
@@ -287,10 +280,104 @@ async fn connect_and_open_shell(
 
     Ok(LiveTerminal {
         session,
+        bastion_session,
         channel,
         cols,
         rows,
     })
+}
+
+async fn connect_terminal_session(
+    app: &AppHandle,
+    server: &ServerConfig,
+    config: Arc<client::Config>,
+) -> Result<(
+    client::Handle<TerminalClient>,
+    Option<client::Handle<TerminalClient>>,
+)> {
+    let known_hosts_path = known_hosts_path()?;
+    let Some(bastion_host) = server
+        .bastion_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        let session = tokio::time::timeout(
+            TERMINAL_CONNECT_TIMEOUT,
+            client::connect(
+                config,
+                (server.host.as_str(), server.ssh_port),
+                TerminalClient {
+                    host_key: terminal_host_key(server),
+                    known_hosts_path,
+                },
+            ),
+        )
+        .await
+        .context("SSH terminal connection timed out")?
+        .with_context(|| format!("failed to connect to {}:{}", server.host, server.ssh_port))?;
+        return Ok((session, None));
+    };
+
+    let bastion_port = server.bastion_port.unwrap_or(22);
+    let mut bastion_session = tokio::time::timeout(
+        TERMINAL_CONNECT_TIMEOUT,
+        client::connect(
+            Arc::clone(&config),
+            (bastion_host, bastion_port),
+            TerminalClient {
+                host_key: format!("{bastion_host}:{bastion_port}"),
+                known_hosts_path: known_hosts_path.clone(),
+            },
+        ),
+    )
+    .await
+    .context("bastion SSH terminal connection timed out")?
+    .with_context(|| format!("failed to connect to bastion {bastion_host}:{bastion_port}"))?;
+
+    tokio::time::timeout(
+        TERMINAL_CONNECT_TIMEOUT,
+        authenticate_bastion(app, &mut bastion_session, server),
+    )
+    .await
+    .context("bastion SSH terminal authentication timed out")??;
+
+    let channel = bastion_session
+        .channel_open_direct_tcpip(
+            server.host.clone(),
+            u32::from(server.ssh_port),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open bastion tunnel to {}:{}",
+                server.host, server.ssh_port
+            )
+        })?;
+
+    let session = tokio::time::timeout(
+        TERMINAL_CONNECT_TIMEOUT,
+        client::connect_stream(
+            config,
+            channel.into_stream(),
+            TerminalClient {
+                host_key: terminal_host_key(server),
+                known_hosts_path,
+            },
+        ),
+    )
+    .await
+    .context("target SSH terminal connection through bastion timed out")?
+    .with_context(|| {
+        format!(
+            "failed to connect to {}:{} through bastion",
+            server.host, server.ssh_port
+        )
+    })?;
+
+    Ok((session, Some(bastion_session)))
 }
 
 async fn authenticate(
@@ -325,6 +412,31 @@ async fn authenticate(
 
     if !accepted {
         bail!("SSH password authentication failed");
+    }
+
+    Ok(())
+}
+
+async fn authenticate_bastion(
+    app: &AppHandle,
+    session: &mut client::Handle<TerminalClient>,
+    server: &ServerConfig,
+) -> Result<()> {
+    let username = server
+        .bastion_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(server.ssh_user.as_str());
+    let password = ssh::read_bastion_password(app, server)
+        .await?
+        .context("bastion password is not saved in Keychain")?;
+    let accepted = session
+        .authenticate_password(username.to_string(), password)
+        .await?;
+
+    if !accepted {
+        bail!("bastion password authentication failed");
     }
 
     Ok(())

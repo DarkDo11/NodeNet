@@ -3,6 +3,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use directories::UserDirs;
+use futures::future::join_all;
 use reqwest::{Client, Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +21,7 @@ use uuid::Uuid;
 const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
+const XRAY_API: &str = "/panel/api/xray";
 const SESSION_TTL: Duration = Duration::from_secs(25 * 60);
 
 type SessionCache = Mutex<HashMap<String, (PanelSession, Instant)>>;
@@ -186,6 +188,16 @@ pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<
     Ok(raw.iter().map(map_inbound).collect())
 }
 
+pub async fn get_xray_config(app: &AppHandle, server: &ServerConfig) -> Result<Value> {
+    let mut session = PanelSession::for_server(app, server).await?;
+    session.get_value(XRAY_API).await
+}
+
+pub async fn save_xray_config(app: &AppHandle, server: &ServerConfig, config: Value) -> Result<()> {
+    let mut session = PanelSession::for_server(app, server).await?;
+    session.post_action(XRAY_API, Some(config)).await
+}
+
 pub async fn get_clients(
     app: &AppHandle,
     server: &ServerConfig,
@@ -298,8 +310,11 @@ pub async fn reset_all_expired_clients(
         .collect::<Vec<_>>();
     let total = expired.len();
 
-    for client in expired {
-        reset_client_traffic(app, server, inbound_id, client.id).await?;
+    let futures = expired
+        .iter()
+        .map(|client| reset_client_traffic(app, server, inbound_id, client.id.clone()));
+    for result in join_all(futures).await {
+        result?;
     }
 
     Ok(total)
@@ -317,8 +332,11 @@ pub async fn delete_all_disabled_clients(
         .collect::<Vec<_>>();
     let total = disabled.len();
 
-    for client in disabled {
-        delete_client(app, server, inbound_id, client.id).await?;
+    let futures = disabled
+        .iter()
+        .map(|client| delete_client(app, server, inbound_id, client.id.clone()));
+    for result in join_all(futures).await {
+        result?;
     }
 
     Ok(total)
@@ -525,6 +543,10 @@ impl PanelSession {
         self.request_obj(Method::GET, path, None).await
     }
 
+    async fn get_value(&mut self, path: &str) -> Result<Value> {
+        self.request_value(Method::GET, path, None).await
+    }
+
     async fn post_action(&mut self, path: &str, body: Option<Value>) -> Result<()> {
         for attempt in 0..=1 {
             let mut request = self.client.request(Method::POST, self.url(path));
@@ -617,6 +639,64 @@ impl PanelSession {
             }
 
             return envelope.obj.context("3x-ui response did not include obj");
+        }
+
+        bail!("3x-ui request failed after relogin")
+    }
+
+    async fn request_value(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
+        for attempt in 0..=1 {
+            let mut request = self.client.request(method.clone(), self.url(path));
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("3x-ui request failed: {path}"))?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+
+            if needs_relogin(status, &text) && attempt == 0 {
+                self.invalidate_cache().await;
+                self.relogin().await?;
+                self.refresh_cache().await;
+                continue;
+            }
+
+            if !status.is_success() {
+                bail!("3x-ui request failed ({status}): {}", text.trim());
+            }
+
+            let value = serde_json::from_str::<Value>(&text)
+                .with_context(|| format!("failed to parse 3x-ui response: {}", text.trim()))?;
+            if let Some(success) = value.get("success").and_then(Value::as_bool) {
+                if !success {
+                    let message = value
+                        .get("msg")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error");
+                    if should_retry_login(Some(message)) && attempt == 0 {
+                        self.invalidate_cache().await;
+                        self.relogin().await?;
+                        self.refresh_cache().await;
+                        continue;
+                    }
+                    bail!("3x-ui request failed: {message}");
+                }
+                return value
+                    .get("obj")
+                    .cloned()
+                    .context("3x-ui response did not include obj");
+            }
+
+            return Ok(value);
         }
 
         bail!("3x-ui request failed after relogin")

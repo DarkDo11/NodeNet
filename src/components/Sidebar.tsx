@@ -3,6 +3,7 @@ import {
   Gauge,
   HardDrive,
   Network,
+  Route,
   ScrollText,
   Settings,
   ShieldCheck,
@@ -12,7 +13,7 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
-export type AppView = "dashboard" | "inbounds" | "clients" | "terminal" | "events" | "settings";
+export type AppView = "dashboard" | "inbounds" | "clients" | "routing" | "terminal" | "events" | "settings";
 
 interface SidebarProps {
   servers: ServerConfig[];
@@ -78,6 +79,14 @@ export default function Sidebar({
         >
           <Users size={16} />
           <span>Clients</span>
+        </button>
+        <button
+          className={activeView === "routing" ? "nav-tab active" : "nav-tab"}
+          onClick={() => onChangeView("routing")}
+          title="Routing"
+        >
+          <Route size={16} />
+          <span>Routing</span>
         </button>
         <button
           className={activeView === "terminal" ? "nav-tab active" : "nav-tab"}

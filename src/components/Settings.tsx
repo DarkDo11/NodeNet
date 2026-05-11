@@ -11,7 +11,8 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import ConfirmModal from "./ConfirmModal";
-import type { AppTheme, ServerConfig, TestConnectionResult } from "../types";
+import SetupPresets from "./SetupPresets";
+import type { AppTheme, PanelSetupInfo, ServerConfig, TestConnectionResult } from "../types";
 
 interface SettingsProps {
   servers: ServerConfig[];
@@ -33,6 +34,9 @@ const emptyServer = (): ServerConfig => ({
   panelUrl: "",
   panelUser: "admin",
   sshKeyPath: "",
+  bastionHost: "",
+  bastionPort: 22,
+  bastionUser: "",
   sshKeyPassphrase: null,
   sslVerify: false,
 });
@@ -57,7 +61,9 @@ export default function Settings({
   const [form, setForm] = useState<ServerConfig>(emptyServer);
   const [password, setPassword] = useState("");
   const [keyPassphrase, setKeyPassphrase] = useState("");
+  const [bastionPassword, setBastionPassword] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
+  const [setupServerId, setSetupServerId] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -68,6 +74,10 @@ export default function Settings({
     () => servers.find((server) => server.id === selectedServerId) ?? null,
     [selectedServerId, servers],
   );
+  const setupServer = useMemo(
+    () => servers.find((server) => server.id === setupServerId) ?? null,
+    [setupServerId, servers],
+  );
 
   useEffect(() => {
     if (!selectedServerId && servers[0]) {
@@ -77,6 +87,10 @@ export default function Settings({
 
   useEffect(() => {
     setForm(selectedServer ? { ...emptyServer(), ...selectedServer } : emptyServer());
+    setPassword("");
+    setKeyPassphrase("");
+    setBastionPassword("");
+    setPanelPassword("");
   }, [selectedServer]);
 
   useEffect(() => {
@@ -89,9 +103,9 @@ export default function Settings({
     setForm((current) => ({ ...current, [key]: value }));
   };
 
-  const saveServer = async () => {
-    setError("");
-    const server = {
+  const normalizedServer = () => {
+    const bastionHost = form.bastionHost?.trim() || null;
+    return {
       ...form,
       id: form.id.trim() || slug(`${form.name}-${form.host}`) || crypto.randomUUID(),
       name: form.name.trim(),
@@ -101,9 +115,17 @@ export default function Settings({
       panelUrl: form.panelUrl?.trim() || null,
       panelUser: form.panelUser?.trim() || "admin",
       sshKeyPath: form.sshKeyPath?.trim() || null,
+      bastionHost,
+      bastionPort: bastionHost ? form.bastionPort || 22 : null,
+      bastionUser: bastionHost ? form.bastionUser?.trim() || form.sshUser.trim() : null,
       sshKeyPassphrase: null,
       sslVerify: form.sslVerify,
     };
+  };
+
+  const saveServer = async () => {
+    setError("");
+    const server = normalizedServer();
 
     if (!server.name || !server.host || !server.sshUser) {
       setError("Name, host and SSH user are required.");
@@ -111,9 +133,13 @@ export default function Settings({
     }
 
     try {
+      const wasNew = !selectedServer;
       await onSaveServer(server);
       setSelectedServerId(server.id);
       setMessage("Server saved");
+      if (wasNew) {
+        setSetupServerId(server.id);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -124,23 +150,12 @@ export default function Settings({
     setError("");
     setMessage("");
     try {
-      const server = {
-        ...form,
-        id: form.id.trim() || slug(`${form.name}-${form.host}`) || crypto.randomUUID(),
-        name: form.name.trim(),
-        host: form.host.trim(),
-        sshUser: form.sshUser.trim(),
-        country: form.country.trim().toUpperCase() || "US",
-        panelUrl: form.panelUrl?.trim() || null,
-        panelUser: form.panelUser?.trim() || "admin",
-        sshKeyPath: form.sshKeyPath?.trim() || null,
-        sshKeyPassphrase: null,
-        sslVerify: form.sslVerify,
-      };
+      const server = normalizedServer();
       const result = await invoke<TestConnectionResult>("test_server_connection", {
         server,
         sshPassword: password || null,
         sshKeyPassphrase: keyPassphrase || null,
+        bastionPassword: bastionPassword || null,
         panelPassword: panelPassword || null,
       });
       const ping = result.ping.latencyMs === null ? "Ping failed" : `${result.ping.latencyMs}ms`;
@@ -150,6 +165,35 @@ export default function Settings({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTesting(false);
+    }
+  };
+
+  const saveBastionPassword = async () => {
+    if (!selectedServer || bastionPassword.length === 0) return;
+
+    await invoke("save_bastion_password", {
+      serverId: selectedServer.id,
+      password: bastionPassword,
+    });
+    setBastionPassword("");
+    setMessage("Bastion password saved in Keychain");
+  };
+
+  const deleteBastionPassword = async () => {
+    if (!selectedServer) return;
+
+    await invoke("delete_bastion_password", { serverId: selectedServer.id });
+    setBastionPassword("");
+    setMessage("Bastion password removed from Keychain");
+  };
+
+  const panelInfoSaved = (info: PanelSetupInfo) => {
+    const host = setupServer?.host ?? form.host;
+    const panelUrl = `http://${host}:${info.port}`;
+    updateForm("panelUrl", panelUrl);
+    updateForm("panelUser", info.username);
+    if (setupServer) {
+      void onSaveServer({ ...setupServer, panelUrl, panelUser: info.username });
     }
   };
 
@@ -236,6 +280,7 @@ export default function Settings({
           onClick={() => {
             setSelectedServerId("");
             setForm(emptyServer());
+            setSetupServerId(null);
           }}
         >
           <Plus size={16} />
@@ -335,6 +380,58 @@ export default function Settings({
             </label>
           </div>
 
+          <details className="settings-subsection">
+            <summary>Bastion / Jump Host</summary>
+            <div className="settings-form-grid">
+              <label className="field checkbox-field">
+                <span>Connect via bastion</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.bastionHost)}
+                  onChange={(event) => {
+                    updateForm("bastionHost", event.target.checked ? form.bastionHost || "" : null);
+                    updateForm("bastionPort", event.target.checked ? form.bastionPort || 22 : null);
+                    updateForm("bastionUser", event.target.checked ? form.bastionUser || form.sshUser : null);
+                  }}
+                />
+              </label>
+              <label className="field">
+                <span>Host</span>
+                <input value={form.bastionHost ?? ""} onChange={(event) => updateForm("bastionHost", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Port</span>
+                <input type="number" min={1} max={65535} value={form.bastionPort ?? 22} onChange={(event) => updateForm("bastionPort", Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>User</span>
+                <input value={form.bastionUser ?? ""} onChange={(event) => updateForm("bastionUser", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} placeholder="Keychain secret" />
+              </label>
+              <div className="settings-actions">
+                <button className="command-button" disabled={!selectedServer} onClick={() => void saveBastionPassword()}>
+                  <Save size={16} />
+                  <span>Save</span>
+                </button>
+                <button className="command-button danger" disabled={!selectedServer} onClick={() => void deleteBastionPassword()}>
+                  <Trash2 size={16} />
+                  <span>Delete</span>
+                </button>
+              </div>
+            </div>
+          </details>
+
+          {selectedServer ? (
+            <div className="server-detail">
+              <strong>Panel</strong>
+              <code>{selectedServer.panelUrl ?? "not configured"}</code>
+              <span>{selectedServer.panelUser ?? "admin"}</span>
+            </div>
+          ) : null}
+
           <div className="settings-actions">
             <button className="command-button primary" onClick={() => void saveServer()}>
               <Save size={16} />
@@ -350,6 +447,14 @@ export default function Settings({
             </button>
           </div>
         </article>
+
+        {setupServer ? (
+          <SetupPresets
+            server={setupServer}
+            onPanelInfoSaved={panelInfoSaved}
+            onDone={() => setSetupServerId(null)}
+          />
+        ) : null}
 
         <article className="settings-panel">
           <div className="settings-panel-header">

@@ -16,6 +16,12 @@ pub struct ServerConfig {
     pub panel_user: Option<String>,
     pub ssh_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bastion_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bastion_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bastion_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key_passphrase: Option<String>,
     #[serde(default)]
     pub ssl_verify: bool,

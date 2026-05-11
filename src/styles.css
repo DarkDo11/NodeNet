@@ -105,7 +105,8 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 26px 16px 18px;
+  min-height: 0;
+  padding: 0 16px 18px;
   border-right: 1px solid var(--border);
   background: transparent;
   backdrop-filter: blur(34px) saturate(1.3);
@@ -114,8 +115,9 @@ button:disabled {
 .brand-row {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 12px;
-  padding: 0 8px;
+  padding: 44px 8px 0;
 }
 
 .brand-mark {
@@ -126,7 +128,14 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--green);
-  background: rgba(255, 255, 255, 0.06);
+  background: transparent;
+}
+
+.brand-mark svg,
+.nav-tab svg {
+  background: transparent;
+  fill: none;
+  stroke: currentColor;
 }
 
 .brand-row h1,
@@ -151,6 +160,7 @@ button:disabled {
 
 .nav-tabs {
   display: grid;
+  flex-shrink: 0;
   gap: 8px;
 }
 
@@ -183,6 +193,7 @@ button:disabled {
 .server-list-header {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   justify-content: space-between;
   padding: 0 8px;
   color: var(--faint);
@@ -192,6 +203,8 @@ button:disabled {
 
 .server-list {
   display: grid;
+  flex: 1;
+  align-content: start;
   gap: 8px;
   min-height: 0;
   overflow-y: auto;
@@ -774,6 +787,35 @@ button:disabled {
   gap: 10px;
 }
 
+.settings-subsection {
+  display: grid;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.settings-subsection summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-subsection[open] summary {
+  margin-bottom: 12px;
+}
+
+.server-detail {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .command-button {
   display: inline-flex;
   align-items: center;
@@ -803,6 +845,134 @@ button:disabled {
 .server-table {
   display: grid;
   gap: 8px;
+}
+
+.setup-presets {
+  gap: 16px;
+}
+
+.preset-list {
+  display: grid;
+  gap: 8px;
+}
+
+.preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.preset-check {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.preset-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
+}
+
+.preset-check span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.preset-check small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preset-done {
+  color: var(--green);
+}
+
+.output-modal {
+  width: min(760px, calc(100vw - 40px));
+}
+
+.output-modal pre {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #07080b;
+  color: var(--text);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.command-output-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(18px);
+}
+
+.command-output-modal {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(13, 15, 20, 0.97);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.5);
+}
+
+.command-output-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.command-output-header h3 {
+  margin: 3px 0 0;
+  font-size: 22px;
+}
+
+.command-output-command {
+  overflow: hidden;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.command-output-command code {
+  display: block;
+  white-space: nowrap;
+}
+
+.command-output-terminal {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #07080b;
+}
+
+.command-output-terminal .xterm {
+  height: 100%;
 }
 
 .server-table-row {
@@ -849,6 +1019,99 @@ code {
   border-radius: 8px;
   background: var(--panel);
   backdrop-filter: blur(28px) saturate(1.2);
+}
+
+.routing-panel {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  backdrop-filter: blur(28px) saturate(1.2);
+}
+
+.routing-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 12px 14px;
+}
+
+.routing-section-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.routing-section-header span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.routing-inline-form {
+  display: grid;
+  align-items: end;
+  gap: 12px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.routing-inline-form.rule-form {
+  grid-template-columns: 150px minmax(220px, 1fr) 180px auto;
+}
+
+.routing-inline-form.outbound-form {
+  grid-template-columns: minmax(160px, 0.9fr) 150px minmax(190px, 1fr) 120px auto;
+}
+
+.routing-form-actions,
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.routing-table {
+  display: grid;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.routing-table.rules {
+  grid-template-columns: 130px minmax(260px, 1fr) 180px 150px;
+}
+
+.routing-table.outbounds {
+  grid-template-columns: minmax(160px, 0.8fr) 150px minmax(240px, 1fr) 96px;
+}
+
+.routing-table.header {
+  min-height: 42px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.routing-table.row {
+  min-height: 56px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+}
+
+.routing-table.row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.routing-table.row strong,
+.routing-table.row code {
+  min-width: 0;
 }
 
 .inbounds-table {
