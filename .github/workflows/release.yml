@@ -42,35 +42,43 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          export VERSION="${GITHUB_REF_NAME#v}"
-          export DMG_NAME="NodeNet_${VERSION}_universal.dmg"
-          export DMG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/dmg/${DMG_NAME}"
-          export SIG_PATH="${DMG_PATH}.sig"
-          export PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG_NAME="NodeNet_${VERSION}_universal.dmg"
+          DMG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/dmg/${DMG_NAME}"
+          SIG_PATH="${DMG_PATH}.sig"
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-          test -f "${DMG_PATH}"
-          test -f "${SIG_PATH}"
+          if [ ! -f "${DMG_PATH}" ]; then
+            echo "ERROR: DMG not found at ${DMG_PATH}"
+            find src-tauri/target/universal-apple-darwin/release/bundle -type f || true
+            exit 1
+          fi
+
+          if [ ! -f "${SIG_PATH}" ]; then
+            echo "ERROR: Signature not found at ${SIG_PATH}"
+            exit 1
+          fi
 
           cp "${DMG_PATH}" "${DMG_NAME}"
 
-          node -e '
-            const fs = require("node:fs");
-            const version = process.env.GITHUB_REF_NAME;
-            const bareVersion = process.env.VERSION;
-            const signature = fs.readFileSync(process.env.SIG_PATH, "utf8").trim();
-            const manifest = {
-              version,
-              notes: `NodeNet ${version}`,
-              pub_date: process.env.PUB_DATE,
-              platforms: {
-                "darwin-universal": {
-                  url: `https://github.com/DarkDo11/NodeNet/releases/download/${version}/NodeNet_${bareVersion}_universal.dmg`,
-                  signature
-                }
+          SIGNATURE=$(cat "${SIG_PATH}")
+
+          cat > latest.json << EOF
+          {
+            "version": "v${VERSION}",
+            "notes": "NodeNet v${VERSION}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-universal": {
+                "url": "https://github.com/DarkDo11/NodeNet/releases/download/v${VERSION}/${DMG_NAME}",
+                "signature": "${SIGNATURE}"
               }
-            };
-            fs.writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
-          '
+            }
+          }
+          EOF
+
+          echo "Generated latest.json:"
+          cat latest.json
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
