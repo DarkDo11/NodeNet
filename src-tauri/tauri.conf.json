@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "NodeNet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.nodenet.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -21,7 +21,9 @@
         "minHeight": 600,
         "decorations": true,
         "windowEffects": {
-          "effects": ["sidebar"],
+          "effects": [
+            "sidebar"
+          ],
           "state": "active"
         },
         "transparent": true,
@@ -44,7 +46,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,5 +58,14 @@
       "icons/icon.ico"
     ],
     "category": "Utility"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/DarkDo11/NodeNet/releases/latest/download/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDMjQ4MDRENDZEOUIwNQpSV1FGbTIzVUJFakNBN0loaGtGV2M5RThpRGlCN01YRm0rY3NuU3dwYjhGbXRLUXdKWTZ1TlNnbgo="
+    }
   }
 }

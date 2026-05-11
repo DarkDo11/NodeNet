@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build universal macOS app
+        run: pnpm tauri build --target universal-apple-darwin
+
+      - name: Prepare release assets
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          export DMG_NAME="NodeNet_${VERSION}_universal.dmg"
+          export DMG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/dmg/${DMG_NAME}"
+          export SIG_PATH="${DMG_PATH}.sig"
+          export PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          test -f "${DMG_PATH}"
+          test -f "${SIG_PATH}"
+
+          cp "${DMG_PATH}" "${DMG_NAME}"
+
+          node -e '
+            const fs = require("node:fs");
+            const version = process.env.GITHUB_REF_NAME;
+            const bareVersion = process.env.VERSION;
+            const signature = fs.readFileSync(process.env.SIG_PATH, "utf8").trim();
+            const manifest = {
+              version,
+              notes: `NodeNet ${version}`,
+              pub_date: process.env.PUB_DATE,
+              platforms: {
+                "darwin-universal": {
+                  url: `https://github.com/DarkDo11/NodeNet/releases/download/${version}/NodeNet_${bareVersion}_universal.dmg`,
+                  signature
+                }
+              }
+            };
+            fs.writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          '
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            NodeNet_*_universal.dmg
+            latest.json

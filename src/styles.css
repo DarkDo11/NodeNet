@@ -1539,6 +1539,14 @@ code {
   font-size: 13px;
 }
 
+.toast.has-action {
+  grid-template-columns: minmax(0, 1fr) auto 28px;
+}
+
+.toast span {
+  min-width: 0;
+}
+
 .toast.warn {
   border-color: rgba(255, 204, 102, 0.32);
 }
@@ -1553,12 +1561,24 @@ code {
 
 .toast button {
   display: grid;
-  width: 28px;
   height: 28px;
   place-items: center;
   border: 0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.06);
+}
+
+.toast-dismiss {
+  width: 28px;
+}
+
+.toast-action {
+  width: auto;
+  min-width: max-content;
+  padding: 0 10px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .onboarding-screen {

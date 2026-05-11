@@ -13,6 +13,7 @@ import Sidebar, { type AppView } from "./components/Sidebar";
 import TerminalView from "./components/TerminalView";
 import ToastHost from "./components/ToastHost";
 import Topbar from "./components/Topbar";
+import UpdateChecker from "./components/UpdateChecker";
 import { useEventsStore } from "./stores/eventsStore";
 import { useMetricsStore } from "./stores/metricsStore";
 import { useServerStore } from "./stores/serverStore";
@@ -466,6 +467,7 @@ export default function App() {
           }}
         />
       ) : null}
+      <UpdateChecker />
       <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

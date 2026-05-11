@@ -109,6 +109,10 @@ export interface ToastMessage {
   id: string;
   level: "info" | "warn" | "error";
   message: string;
+  action?: {
+    label: string;
+    onClick: () => void | Promise<void>;
+  };
 }
 
 export type JsonPrimitive = string | number | boolean | null;

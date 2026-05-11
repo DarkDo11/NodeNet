@@ -12,9 +12,19 @@ export default function ToastHost({ toasts, onDismiss }: ToastHostProps) {
   return (
     <div className="toast-host">
       {toasts.map((toast) => (
-        <div key={toast.id} className={`toast ${toast.level}`}>
+        <div key={toast.id} className={`toast ${toast.level}${toast.action ? " has-action" : ""}`}>
           <span>{toast.message}</span>
-          <button onClick={() => onDismiss(toast.id)} title="Dismiss">
+          {toast.action ? (
+            <button
+              className="toast-action"
+              onClick={() => {
+                void toast.action?.onClick();
+              }}
+            >
+              {toast.action.label}
+            </button>
+          ) : null}
+          <button className="toast-dismiss" onClick={() => onDismiss(toast.id)} title="Dismiss">
             <X size={14} />
           </button>
         </div>
