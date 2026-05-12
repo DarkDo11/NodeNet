@@ -91,6 +91,16 @@ pub fn cleanup_stale_sockets() {
             }
         }
     }
+
+    if let Ok(entries) = std::fs::read_dir(ssh_socket_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("c-") && name.ends_with(".sock") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 pub async fn save_password(app: &AppHandle, server: &ServerConfig, password: &str) -> Result<()> {
@@ -566,7 +576,7 @@ async fn get_or_create_connection(
         SSH_POOL.lock().await.remove(&account);
     }
 
-    let control_path = std::env::temp_dir().join(format!("nodenet-ssh-{}.sock", Uuid::new_v4()));
+    let control_path = ssh_control_path()?;
     open_master(app, server, &control_path).await?;
     let connection = Arc::new(Mutex::new(SshConnection {
         control_path,
@@ -577,6 +587,16 @@ async fn get_or_create_connection(
         .await
         .insert(account, Arc::clone(&connection));
     Ok(connection)
+}
+
+fn ssh_socket_dir() -> PathBuf {
+    PathBuf::from("/tmp/nodenet-ssh")
+}
+
+fn ssh_control_path() -> Result<PathBuf> {
+    let dir = ssh_socket_dir();
+    fs::create_dir_all(&dir).context("failed to create ssh socket directory")?;
+    Ok(dir.join(format!("c-{}.sock", Uuid::new_v4().simple())))
 }
 
 fn connection_pool_account(server: &ServerConfig) -> String {

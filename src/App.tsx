@@ -260,6 +260,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <div className="window-drag-strip" data-tauri-drag-region />
       <Sidebar
         servers={servers}
         selectedServerId={selectedServerId}

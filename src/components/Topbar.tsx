@@ -1,4 +1,6 @@
 import { Archive, Power, RefreshCw, RotateCcw } from "lucide-react";
+import type { MouseEvent } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { GlobalTrafficStats, ServerConfig } from "../types";
 
 interface TopbarProps {
@@ -19,6 +21,12 @@ const formatBytes = (bytes: number) => {
   return `${bytes.toFixed(0)} B`;
 };
 
+const shouldStartWindowDrag = (event: MouseEvent<HTMLElement>) => {
+  if (event.button !== 0) return false;
+  const target = event.target as HTMLElement | null;
+  return !target?.closest("button, input, select, textarea, a, [data-no-window-drag]");
+};
+
 export default function Topbar({
   server,
   stats,
@@ -30,15 +38,22 @@ export default function Topbar({
 }: TopbarProps) {
   const disabled = !server || isRunningAction;
 
+  const startWindowDrag = (event: MouseEvent<HTMLElement>) => {
+    if (!shouldStartWindowDrag(event)) return;
+
+    event.preventDefault();
+    void getCurrentWindow().startDragging();
+  };
+
   return (
-    <header className="topbar">
+    <header className="topbar" onMouseDown={startWindowDrag}>
       <div className="global-stats">
-        <span>Day ↓ {formatBytes(stats.dayDown)}</span>
-        <span>Day ↑ {formatBytes(stats.dayUp)}</span>
-        <span>Month ↓ {formatBytes(stats.monthDown)}</span>
-        <span>Month ↑ {formatBytes(stats.monthUp)}</span>
+        <span data-tauri-drag-region>Day ↓ {formatBytes(stats.dayDown)}</span>
+        <span data-tauri-drag-region>Day ↑ {formatBytes(stats.dayUp)}</span>
+        <span data-tauri-drag-region>Month ↓ {formatBytes(stats.monthDown)}</span>
+        <span data-tauri-drag-region>Month ↑ {formatBytes(stats.monthUp)}</span>
       </div>
-      <div className="quick-actions">
+      <div className="quick-actions" data-no-window-drag>
         {message ? <span className="action-message">{message}</span> : null}
         <button className="icon-button" disabled={disabled} onClick={onRestartXray} title="Restart Xray">
           {isRunningAction ? <RefreshCw size={17} className="spin" /> : <RotateCcw size={17} />}
