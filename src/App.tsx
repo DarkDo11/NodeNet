@@ -295,163 +295,161 @@ export default function App() {
             if (selectedServerId) void downloadConfig(selectedServerId);
           }}
         />
-        {showOnboarding ? (
-          <Onboarding
-            onCreateServer={saveServer}
-            onSetupStarted={setOnboardingSetupServerId}
-            onFinishSetup={() => {
-              setOnboardingSetupServerId(null);
-              setActiveView("dashboard");
-            }}
-          />
-        ) : null}
-        {!showOnboarding && activeView === "dashboard" ? (
-          <Dashboard
-            server={selectedServer}
-            metrics={selectedServerId ? metricsByServer[selectedServerId] : undefined}
-            history={selectedServerId ? historyByServer[selectedServerId] ?? [] : []}
-            status={selectedServerId ? statusById[selectedServerId] : undefined}
-            error={selectedServerId ? errorByServer[selectedServerId] : undefined}
-            isPolling={selectedServerId ? isPollingServer(selectedServerId) : false}
-            onRetry={() => {
-              if (selectedServerId) void fetchMetrics(selectedServerId);
-            }}
-          />
-        ) : null}
-        {!showOnboarding && activeView === "inbounds" ? (
-          <Inbounds
-            server={selectedServer}
-            inbounds={selectedInbounds}
-            selectedInboundId={selectedInboundId}
-            error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
-            isLoading={isLoadingInbounds}
-            isRunningAction={isRunningAction}
-            onRefresh={() => {
-              if (selectedServerId) void loadInbounds(selectedServerId);
-            }}
-            onSelectInbound={(inboundId) => {
-              if (!selectedServerId) return;
-              selectInbound(selectedServerId, inboundId);
-              void loadClients(selectedServerId, inboundId);
-              setActiveView("clients");
-            }}
-            onRestartXray={() => {
-              if (selectedServerId) void restartXray(selectedServerId);
-            }}
-          />
-        ) : null}
-        {!showOnboarding && activeView === "clients" ? (
-          <Clients
-            server={selectedServer}
-            inbound={selectedInbound}
-            clients={selectedClients}
-            error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
-            isLoading={isLoadingClients}
-            isRunningAction={isRunningAction}
-            onRefresh={() => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void loadClients(selectedServerId, selectedInboundId);
-              }
-            }}
-            onAddClient={(name, limitGb, expireDays) => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void addClient(selectedServerId, selectedInboundId, name, limitGb, expireDays);
-              }
-            }}
-            onReset={(client: ThreeXClient) => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void resetClientTraffic(selectedServerId, selectedInboundId, client.id);
-              }
-            }}
-            onDelete={(client: ThreeXClient) => {
-              if (selectedServerId && selectedInboundId !== null) {
-                setConfirm({
-                  title: `Delete ${client.email}?`,
-                  message: `Delete ${client.email}? This cannot be undone.`,
-                  confirmLabel: "Delete client",
-                  onConfirm: () => void deleteClient(selectedServerId, selectedInboundId, client.id),
-                });
-              }
-            }}
-            onExtend={(client: ThreeXClient, days) => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void extendClient(selectedServerId, selectedInboundId, client.id, days);
-              }
-            }}
-            onQr={(client: ThreeXClient) => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void generateClientLink(selectedServerId, selectedInboundId, client);
-              }
-            }}
-            onResetAllExpired={() => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void resetAllExpired(selectedServerId, selectedInboundId);
-              }
-            }}
-            onDeleteAllDisabled={() => {
-              if (selectedServerId && selectedInboundId !== null) {
-                setConfirm({
-                  title: "Delete all disabled clients?",
-                  message: "Delete all disabled clients? This cannot be undone.",
-                  confirmLabel: "Delete disabled",
-                  onConfirm: () => void deleteAllDisabled(selectedServerId, selectedInboundId),
-                });
-              }
-            }}
-            onExportCsv={() => {
-              if (selectedServerId && selectedInboundId !== null) {
-                void exportClientsCsv(selectedServerId, selectedInboundId);
-              }
-            }}
-          />
-        ) : null}
-        {!showOnboarding && activeView === "routing" ? (
-          <RoutingEditor
-            server={selectedServer}
-            config={selectedServerId ? xrayConfigByServer[selectedServerId] ?? null : null}
-            error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
-            isLoading={isLoadingXrayConfig}
-            isSaving={isSavingXrayConfig}
-            onRefresh={() => {
-              if (selectedServerId) void loadXrayConfig(selectedServerId);
-            }}
-            onSave={async (config) => {
-              if (!selectedServerId) return;
-              try {
-                await saveXrayConfig(selectedServerId, config);
-                pushToast("info", "Xray routing saved");
-              } catch (error) {
-                pushToast("error", error instanceof Error ? error.message : String(error));
-                throw error;
-              }
-            }}
-          />
-        ) : null}
-        {!showOnboarding ? (
-          <div className="view-slot" style={{ display: activeView === "terminal" ? "flex" : "none" }}>
-            <TerminalView server={selectedServer} />
-          </div>
-        ) : null}
-        {!showOnboarding && activeView === "events" ? (
-          <EventsLog
-            events={events}
-            error={eventsError}
-            onRefresh={() => {
-              void loadEvents();
-            }}
-          />
-        ) : null}
-        {!showOnboarding && activeView === "settings" ? (
-          <Settings
-            servers={servers}
-            pollIntervalSec={pollIntervalSec}
-            theme={theme}
-            onPollIntervalChange={updatePollInterval}
-            onThemeChange={updateTheme}
-            onSaveServer={saveServer}
-            onDeleteServer={deleteServer}
-          />
-        ) : null}
+        <div className="view-slot">
+          {showOnboarding ? (
+            <Onboarding
+              onCreateServer={saveServer}
+              onSetupStarted={setOnboardingSetupServerId}
+              onFinishSetup={() => {
+                setOnboardingSetupServerId(null);
+                setActiveView("dashboard");
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "dashboard" ? (
+            <Dashboard
+              server={selectedServer}
+              metrics={selectedServerId ? metricsByServer[selectedServerId] : undefined}
+              history={selectedServerId ? historyByServer[selectedServerId] ?? [] : []}
+              status={selectedServerId ? statusById[selectedServerId] : undefined}
+              error={selectedServerId ? errorByServer[selectedServerId] : undefined}
+              isPolling={selectedServerId ? isPollingServer(selectedServerId) : false}
+              onRetry={() => {
+                if (selectedServerId) void fetchMetrics(selectedServerId);
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "inbounds" ? (
+            <Inbounds
+              server={selectedServer}
+              inbounds={selectedInbounds}
+              selectedInboundId={selectedInboundId}
+              error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
+              isLoading={isLoadingInbounds}
+              isRunningAction={isRunningAction}
+              onRefresh={() => {
+                if (selectedServerId) void loadInbounds(selectedServerId);
+              }}
+              onSelectInbound={(inboundId) => {
+                if (!selectedServerId) return;
+                selectInbound(selectedServerId, inboundId);
+                void loadClients(selectedServerId, inboundId);
+                setActiveView("clients");
+              }}
+              onRestartXray={() => {
+                if (selectedServerId) void restartXray(selectedServerId);
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "clients" ? (
+            <Clients
+              server={selectedServer}
+              inbound={selectedInbound}
+              clients={selectedClients}
+              error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
+              isLoading={isLoadingClients}
+              isRunningAction={isRunningAction}
+              onRefresh={() => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void loadClients(selectedServerId, selectedInboundId);
+                }
+              }}
+              onAddClient={(name, limitGb, expireDays) => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void addClient(selectedServerId, selectedInboundId, name, limitGb, expireDays);
+                }
+              }}
+              onReset={(client: ThreeXClient) => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void resetClientTraffic(selectedServerId, selectedInboundId, client.id);
+                }
+              }}
+              onDelete={(client: ThreeXClient) => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  setConfirm({
+                    title: `Delete ${client.email}?`,
+                    message: `Delete ${client.email}? This cannot be undone.`,
+                    confirmLabel: "Delete client",
+                    onConfirm: () => void deleteClient(selectedServerId, selectedInboundId, client.id),
+                  });
+                }
+              }}
+              onExtend={(client: ThreeXClient, days) => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void extendClient(selectedServerId, selectedInboundId, client.id, days);
+                }
+              }}
+              onQr={(client: ThreeXClient) => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void generateClientLink(selectedServerId, selectedInboundId, client);
+                }
+              }}
+              onResetAllExpired={() => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void resetAllExpired(selectedServerId, selectedInboundId);
+                }
+              }}
+              onDeleteAllDisabled={() => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  setConfirm({
+                    title: "Delete all disabled clients?",
+                    message: "Delete all disabled clients? This cannot be undone.",
+                    confirmLabel: "Delete disabled",
+                    onConfirm: () => void deleteAllDisabled(selectedServerId, selectedInboundId),
+                  });
+                }
+              }}
+              onExportCsv={() => {
+                if (selectedServerId && selectedInboundId !== null) {
+                  void exportClientsCsv(selectedServerId, selectedInboundId);
+                }
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "routing" ? (
+            <RoutingEditor
+              server={selectedServer}
+              config={selectedServerId ? xrayConfigByServer[selectedServerId] ?? null : null}
+              error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
+              isLoading={isLoadingXrayConfig}
+              isSaving={isSavingXrayConfig}
+              onRefresh={() => {
+                if (selectedServerId) void loadXrayConfig(selectedServerId);
+              }}
+              onSave={async (config) => {
+                if (!selectedServerId) return;
+                try {
+                  await saveXrayConfig(selectedServerId, config);
+                  pushToast("info", "Xray routing saved");
+                } catch (error) {
+                  pushToast("error", error instanceof Error ? error.message : String(error));
+                  throw error;
+                }
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "terminal" ? <TerminalView server={selectedServer} /> : null}
+          {!showOnboarding && activeView === "events" ? (
+            <EventsLog
+              events={events}
+              error={eventsError}
+              onRefresh={() => {
+                void loadEvents();
+              }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "settings" ? (
+            <Settings
+              servers={servers}
+              pollIntervalSec={pollIntervalSec}
+              theme={theme}
+              onPollIntervalChange={updatePollInterval}
+              onThemeChange={updateTheme}
+              onSaveServer={saveServer}
+              onDeleteServer={deleteServer}
+            />
+          ) : null}
+        </div>
       </div>
       <QrModal title={qrTitle} link={qrLink} onClose={closeQr} />
       {confirm ? (

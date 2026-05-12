@@ -37,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate DMG background
+        run: node scripts/make-dmg-bg.js
+
       - name: Build universal macOS app
         run: pnpm tauri build --target universal-apple-darwin
 

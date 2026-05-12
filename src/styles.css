@@ -77,6 +77,52 @@ button:disabled {
   opacity: 0.52;
 }
 
+.content,
+.onboarding-screen,
+.server-list,
+.output-modal pre,
+.command-output-terminal {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(81, 216, 138, 0.48) transparent;
+}
+
+.content::-webkit-scrollbar,
+.onboarding-screen::-webkit-scrollbar,
+.server-list::-webkit-scrollbar,
+.output-modal pre::-webkit-scrollbar,
+.command-output-terminal::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.content::-webkit-scrollbar-track,
+.onboarding-screen::-webkit-scrollbar-track,
+.server-list::-webkit-scrollbar-track,
+.output-modal pre::-webkit-scrollbar-track,
+.command-output-terminal::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.content::-webkit-scrollbar-thumb,
+.onboarding-screen::-webkit-scrollbar-thumb,
+.server-list::-webkit-scrollbar-thumb,
+.output-modal pre::-webkit-scrollbar-thumb,
+.command-output-terminal::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(81, 216, 138, 0.48);
+  background-clip: content-box;
+}
+
+.content::-webkit-scrollbar-thumb:hover,
+.onboarding-screen::-webkit-scrollbar-thumb:hover,
+.server-list::-webkit-scrollbar-thumb:hover,
+.output-modal pre::-webkit-scrollbar-thumb:hover,
+.command-output-terminal::-webkit-scrollbar-thumb:hover {
+  background: rgba(81, 216, 138, 0.68);
+  background-clip: content-box;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 292px 1fr;
@@ -93,12 +139,15 @@ button:disabled {
   min-width: 0;
   height: 100%;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .view-slot {
+  display: flex;
   min-width: 0;
   min-height: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -364,7 +413,11 @@ button:disabled {
   flex-direction: column;
   gap: 18px;
   padding: 22px 30px 30px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 .dashboard-header {
@@ -1587,7 +1640,11 @@ code {
   flex: 1;
   place-items: center;
   padding: 28px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 .onboarding-panel {
