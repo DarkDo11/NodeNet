@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -25,12 +25,12 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           run_install: false
 
@@ -45,7 +45,9 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           DMG_NAME="NodeNet_${VERSION}_universal.dmg"
           DMG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/dmg/${DMG_NAME}"
-          SIG_PATH="${DMG_PATH}.sig"
+          UPDATE_NAME="NodeNet.app.tar.gz"
+          UPDATE_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/${UPDATE_NAME}"
+          SIG_PATH="${UPDATE_PATH}.sig"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
           if [ ! -f "${DMG_PATH}" ]; then
@@ -54,14 +56,23 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "${UPDATE_PATH}" ]; then
+            echo "ERROR: Updater artifact not found at ${UPDATE_PATH}"
+            find src-tauri/target/universal-apple-darwin/release/bundle -type f || true
+            exit 1
+          fi
+
           if [ ! -f "${SIG_PATH}" ]; then
-            echo "ERROR: Signature not found at ${SIG_PATH}"
+            echo "ERROR: Updater signature not found at ${SIG_PATH}"
+            find src-tauri/target/universal-apple-darwin/release/bundle -type f || true
             exit 1
           fi
 
           cp "${DMG_PATH}" "${DMG_NAME}"
+          cp "${UPDATE_PATH}" "${UPDATE_NAME}"
 
           SIGNATURE=$(cat "${SIG_PATH}")
+          UPDATE_URL="https://github.com/DarkDo11/NodeNet/releases/download/v${VERSION}/${UPDATE_NAME}"
 
           cat > latest.json << EOF
           {
@@ -69,8 +80,12 @@ jobs:
             "notes": "NodeNet v${VERSION}",
             "pub_date": "${PUB_DATE}",
             "platforms": {
-              "darwin-universal": {
-                "url": "https://github.com/DarkDo11/NodeNet/releases/download/v${VERSION}/${DMG_NAME}",
+              "darwin-x86_64": {
+                "url": "${UPDATE_URL}",
+                "signature": "${SIGNATURE}"
+              },
+              "darwin-aarch64": {
+                "url": "${UPDATE_URL}",
                 "signature": "${SIGNATURE}"
               }
             }
@@ -85,4 +100,5 @@ jobs:
         with:
           files: |
             NodeNet_*_universal.dmg
+            NodeNet.app.tar.gz
             latest.json
