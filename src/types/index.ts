@@ -13,6 +13,7 @@ export interface ServerConfig {
   bastionHost?: string | null;
   bastionPort?: number | null;
   bastionUser?: string | null;
+  bastionSshKeyPath?: string | null;
   sshKeyPassphrase?: string | null;
   sslVerify: boolean;
 }

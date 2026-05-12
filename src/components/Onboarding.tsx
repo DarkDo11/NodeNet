@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Plus, ShieldCheck, Wifi } from "lucide-react";
+import { ArrowLeft, KeyRound, Plus, ShieldCheck, Wifi } from "lucide-react";
 import { useState } from "react";
 import SetupPresets from "./SetupPresets";
 import type { ServerConfig, TestConnectionResult } from "../types";
@@ -29,11 +29,14 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
   const [panelUser, setPanelUser] = useState("admin");
   const [sslVerify, setSslVerify] = useState(false);
   const [sshPassword, setSshPassword] = useState("");
+  const [sshKeyPath, setSshKeyPath] = useState("");
+  const [sshKeyPassphrase, setSshKeyPassphrase] = useState("");
   const [useBastion, setUseBastion] = useState(false);
   const [bastionHost, setBastionHost] = useState("");
   const [bastionPort, setBastionPort] = useState(22);
   const [bastionUser, setBastionUser] = useState("root");
   const [bastionPassword, setBastionPassword] = useState("");
+  const [bastionSshKeyPath, setBastionSshKeyPath] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
   const [error, setError] = useState("");
   const [testMessage, setTestMessage] = useState("");
@@ -50,10 +53,11 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
     country: country.trim().toUpperCase() || "US",
     panelUrl: panelUrl.trim() || null,
     panelUser: panelUser.trim() || "admin",
-    sshKeyPath: null,
+    sshKeyPath: sshKeyPath.trim() || null,
     bastionHost: useBastion ? bastionHost.trim() || null : null,
     bastionPort: useBastion ? bastionPort || 22 : null,
     bastionUser: useBastion ? bastionUser.trim() || sshUser.trim() : null,
+    bastionSshKeyPath: useBastion ? bastionSshKeyPath.trim() || null : null,
     sshKeyPassphrase: null,
     sslVerify,
   });
@@ -73,6 +77,9 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
       await onCreateServer(server);
       if (sshPassword) {
         await invoke("save_ssh_password", { serverId: server.id, password: sshPassword });
+      }
+      if (sshKeyPassphrase) {
+        await invoke("save_ssh_key_passphrase", { serverId: server.id, passphrase: sshKeyPassphrase });
       }
       if (bastionPassword) {
         await invoke("save_bastion_password", { serverId: server.id, password: bastionPassword });
@@ -103,7 +110,7 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
       const result = await invoke<TestConnectionResult>("test_server_connection", {
         server,
         sshPassword: sshPassword || null,
-        sshKeyPassphrase: null,
+        sshKeyPassphrase: sshKeyPassphrase || null,
         bastionPassword: bastionPassword || null,
         panelPassword: panelPassword || null,
       });
@@ -126,8 +133,19 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
             <h2>Setup presets</h2>
             <span className="server-target">{createdServer.name}</span>
           </div>
-          <SetupPresets server={createdServer} onDone={onFinishSetup} />
+          <SetupPresets
+            server={createdServer}
+            onServerUpdated={async (server) => {
+              await onCreateServer(server);
+              setCreatedServer(server);
+            }}
+            onDone={onFinishSetup}
+          />
           <div className="settings-actions">
+            <button className="command-button" onClick={() => setCreatedServer(null)}>
+              <ArrowLeft size={16} />
+              <span>Back</span>
+            </button>
             <button className="command-button" onClick={onFinishSetup}>
               <span>Skip presets</span>
             </button>
@@ -178,6 +196,14 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
             <input type="password" value={sshPassword} onChange={(event) => setSshPassword(event.target.value)} />
           </label>
           <label className="field wide">
+            <span>SSH key path</span>
+            <input value={sshKeyPath} onChange={(event) => setSshKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519" />
+          </label>
+          <label className="field">
+            <span>SSH key passphrase</span>
+            <input type="password" value={sshKeyPassphrase} onChange={(event) => setSshKeyPassphrase(event.target.value)} placeholder="Keychain secret" />
+          </label>
+          <label className="field wide">
             <span>3x-ui panel URL</span>
             <input value={panelUrl} onChange={(event) => setPanelUrl(event.target.value)} placeholder="https://panel.example.com" />
           </label>
@@ -215,8 +241,12 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
               <input value={bastionUser} onChange={(event) => setBastionUser(event.target.value)} />
             </label>
             <label className="field wide">
-              <span>Bastion password</span>
+              <span>Bastion password / key passphrase</span>
               <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} />
+            </label>
+            <label className="field wide">
+              <span>Bastion SSH key path</span>
+              <input value={bastionSshKeyPath} onChange={(event) => setBastionSshKeyPath(event.target.value)} placeholder="~/.ssh/bastion_ed25519" />
             </label>
           </div>
         </details>

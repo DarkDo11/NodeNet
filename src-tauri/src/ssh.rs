@@ -307,7 +307,7 @@ async fn execute_once_with_options(
             .arg("IdentitiesOnly=yes");
     }
 
-    apply_bastion_proxy_jump(&mut command, server);
+    apply_bastion_proxy(&mut command, server);
 
     command
         .arg(format!("{}@{}", server.ssh_user, server.host))
@@ -376,7 +376,7 @@ async fn execute_streaming_once(
             .arg("IdentitiesOnly=yes");
     }
 
-    apply_bastion_proxy_jump(&mut command, server);
+    apply_bastion_proxy(&mut command, server);
 
     command
         .arg(format!("{}@{}", server.ssh_user, server.host))
@@ -520,7 +520,7 @@ async fn download_file_once(
             .arg("IdentitiesOnly=yes");
     }
 
-    apply_bastion_proxy_jump(&mut command, server);
+    apply_bastion_proxy(&mut command, server);
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
@@ -580,8 +580,8 @@ async fn get_or_create_connection(
 }
 
 fn connection_pool_account(server: &ServerConfig) -> String {
-    match bastion_proxy_jump(server) {
-        Some(proxy_jump) => format!("{} via {proxy_jump}", keychain_account(server)),
+    match bastion_route_id(server) {
+        Some(route) => format!("{} via {route}", keychain_account(server)),
         None => keychain_account(server),
     }
 }
@@ -631,7 +631,7 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
             .arg("IdentitiesOnly=yes");
     }
 
-    apply_bastion_proxy_jump(&mut command, server);
+    apply_bastion_proxy(&mut command, server);
 
     if let Some(askpass_path) = &askpass_path {
         command
@@ -674,7 +674,7 @@ async fn is_connection_alive(server: &ServerConfig, control_path: &Path) -> bool
             .arg(server.ssh_port.to_string())
             .arg("-o")
             .arg(format!("ControlPath={}", control_path.display()));
-        apply_bastion_proxy_jump(&mut command, server);
+        apply_bastion_proxy(&mut command, server);
         command.arg(format!("{}@{}", server.ssh_user, server.host));
         command.output().await
     })
@@ -698,7 +698,7 @@ async fn close_master(server: &ServerConfig, control_path: &Path) {
             .arg(server.ssh_port.to_string())
             .arg("-o")
             .arg(format!("ControlPath={}", control_path.display()));
-        apply_bastion_proxy_jump(&mut command, server);
+        apply_bastion_proxy(&mut command, server);
         command.arg(format!("{}@{}", server.ssh_user, server.host));
         command.output().await
     })
@@ -778,28 +778,60 @@ fn create_askpass_script(
     Ok(Some(path))
 }
 
-fn apply_bastion_proxy_jump(command: &mut Command, server: &ServerConfig) {
-    if let Some(proxy_jump) = bastion_proxy_jump(server) {
+fn apply_bastion_proxy(command: &mut Command, server: &ServerConfig) {
+    if let Some(proxy_command) = bastion_proxy_command(server) {
+        command
+            .arg("-o")
+            .arg(format!("ProxyCommand={proxy_command}"));
+    } else if let Some(proxy_jump) = bastion_proxy_jump(server) {
         command.arg("-o").arg(format!("ProxyJump={proxy_jump}"));
     }
 }
 
-fn bastion_proxy_jump(server: &ServerConfig) -> Option<String> {
-    let host = server
-        .bastion_host
+fn bastion_proxy_command(server: &ServerConfig) -> Option<String> {
+    let key_path = server
+        .bastion_ssh_key_path
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
+    let host = bastion_host(server)?;
+    let user = bastion_user(server);
+    let port = server.bastion_port.unwrap_or(22);
 
-    let user = server
+    Some(format!(
+        "ssh -W %h:%p -p {port} -o BatchMode=no -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=publickey,password -i {} -o IdentitiesOnly=yes {}",
+        shell_single_quote(&expand_tilde(key_path)),
+        shell_single_quote(&format!("{user}@{host}")),
+    ))
+}
+
+fn bastion_proxy_jump(server: &ServerConfig) -> Option<String> {
+    let host = bastion_host(server)?;
+    let user = bastion_user(server);
+    let port = server.bastion_port.unwrap_or(22);
+
+    Some(format!("{user}@{host}:{port}"))
+}
+
+fn bastion_route_id(server: &ServerConfig) -> Option<String> {
+    bastion_proxy_command(server).or_else(|| bastion_proxy_jump(server))
+}
+
+fn bastion_host(server: &ServerConfig) -> Option<&str> {
+    server
+        .bastion_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn bastion_user(server: &ServerConfig) -> &str {
+    server
         .bastion_user
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(server.ssh_user.as_str());
-    let port = server.bastion_port.unwrap_or(22);
-
-    Some(format!("{user}@{host}:{port}"))
+        .unwrap_or(server.ssh_user.as_str())
 }
 
 fn shell_case_pattern(value: &str) -> String {

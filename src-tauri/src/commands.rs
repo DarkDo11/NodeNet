@@ -14,7 +14,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize)]
@@ -34,6 +34,13 @@ pub struct PanelSetupInfo {
     pub username: String,
     pub password: String,
     pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshKeyPair {
+    pub private_key_path: String,
+    pub public_key_path: String,
 }
 
 #[tauri::command]
@@ -535,6 +542,84 @@ pub fn list_ssh_public_keys() -> Result<Vec<String>, String> {
 pub fn read_ssh_public_key(path: String) -> Result<String, String> {
     let path = expand_public_key_path(&path)?;
     fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_ssh_key_pair(server_id: String, key_name: String) -> Result<SshKeyPair, String> {
+    let ssh_dir = directories::BaseDirs::new()
+        .ok_or_else(|| "unable to resolve user directories".to_string())?
+        .home_dir()
+        .join(".ssh");
+    fs::create_dir_all(&ssh_dir).map_err(|error| error.to_string())?;
+
+    let key_name = sanitize_ssh_key_name(&key_name)?;
+    let mut private_key_path = ssh_dir.join(&key_name);
+    let mut index = 2;
+    while private_key_path.exists() || public_key_path_for_private(&private_key_path).exists() {
+        private_key_path = ssh_dir.join(format!("{key_name}_{index}"));
+        index += 1;
+    }
+    let public_key_path = public_key_path_for_private(&private_key_path);
+
+    let output = Command::new("ssh-keygen")
+        .args([
+            "-t",
+            "ed25519",
+            "-f",
+            &private_key_path.display().to_string(),
+            "-N",
+            "",
+            "-C",
+            &format!("nodenet-{server_id}"),
+        ])
+        .output()
+        .map_err(|error| format!("failed to run ssh-keygen: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ssh-keygen failed: {}", stderr.trim()));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&private_key_path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&private_key_path, permissions).map_err(|error| error.to_string())?;
+    }
+
+    Ok(SshKeyPair {
+        private_key_path: private_key_path.display().to_string(),
+        public_key_path: public_key_path.display().to_string(),
+    })
+}
+
+fn sanitize_ssh_key_name(key_name: &str) -> Result<String, String> {
+    let sanitized = key_name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['.', '_', '-'])
+        .to_string();
+
+    if sanitized.is_empty() {
+        Err("SSH key name is required".to_string())
+    } else {
+        Ok(sanitized)
+    }
+}
+
+fn public_key_path_for_private(private_key_path: &PathBuf) -> PathBuf {
+    PathBuf::from(format!("{}.pub", private_key_path.display()))
 }
 
 #[tauri::command]

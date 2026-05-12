@@ -37,6 +37,7 @@ const emptyServer = (): ServerConfig => ({
   bastionHost: "",
   bastionPort: 22,
   bastionUser: "",
+  bastionSshKeyPath: "",
   sshKeyPassphrase: null,
   sslVerify: false,
 });
@@ -118,6 +119,7 @@ export default function Settings({
       bastionHost,
       bastionPort: bastionHost ? form.bastionPort || 22 : null,
       bastionUser: bastionHost ? form.bastionUser?.trim() || form.sshUser.trim() : null,
+      bastionSshKeyPath: bastionHost ? form.bastionSshKeyPath?.trim() || null : null,
       sshKeyPassphrase: null,
       sslVerify: form.sslVerify,
     };
@@ -392,6 +394,7 @@ export default function Settings({
                     updateForm("bastionHost", event.target.checked ? form.bastionHost || "" : null);
                     updateForm("bastionPort", event.target.checked ? form.bastionPort || 22 : null);
                     updateForm("bastionUser", event.target.checked ? form.bastionUser || form.sshUser : null);
+                    updateForm("bastionSshKeyPath", event.target.checked ? form.bastionSshKeyPath || "" : null);
                   }}
                 />
               </label>
@@ -408,8 +411,12 @@ export default function Settings({
                 <input value={form.bastionUser ?? ""} onChange={(event) => updateForm("bastionUser", event.target.value)} />
               </label>
               <label className="field">
-                <span>Password</span>
+                <span>Password / key passphrase</span>
                 <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} placeholder="Keychain secret" />
+              </label>
+              <label className="field wide">
+                <span>SSH key path</span>
+                <input value={form.bastionSshKeyPath ?? ""} onChange={(event) => updateForm("bastionSshKeyPath", event.target.value)} placeholder="~/.ssh/bastion_ed25519" />
               </label>
               <div className="settings-actions">
                 <button className="command-button" disabled={!selectedServer} onClick={() => void saveBastionPassword()}>
@@ -452,6 +459,7 @@ export default function Settings({
           <SetupPresets
             server={setupServer}
             onPanelInfoSaved={panelInfoSaved}
+            onServerUpdated={onSaveServer}
             onDone={() => setSetupServerId(null)}
           />
         ) : null}

@@ -90,6 +90,7 @@ fn main() {
             commands::get_panel_setup_info_command,
             commands::list_ssh_public_keys,
             commands::read_ssh_public_key,
+            commands::create_ssh_key_pair,
             commands::load_metrics_cache,
             commands::save_metrics_cache,
             tray::rebuild_tray,

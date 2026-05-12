@@ -428,6 +428,29 @@ async fn authenticate_bastion(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(server.ssh_user.as_str());
+    if let Some(key_path) = server
+        .bastion_ssh_key_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let passphrase = ssh::read_bastion_password(app, server).await?;
+        let private_key = load_secret_key(expand_tilde(key_path), passphrase.as_deref())
+            .with_context(|| format!("failed to load bastion SSH key {}", key_path))?;
+        let accepted = session
+            .authenticate_publickey(
+                username.to_string(),
+                PrivateKeyWithHashAlg::new(Arc::new(private_key), None)?,
+            )
+            .await?;
+
+        if !accepted {
+            bail!("bastion public key authentication failed");
+        }
+
+        return Ok(());
+    }
+
     let password = ssh::read_bastion_password(app, server)
         .await?
         .context("bastion password is not saved in Keychain")?;

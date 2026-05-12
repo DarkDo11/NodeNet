@@ -872,11 +872,13 @@ button:disabled {
 .command-button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   min-height: 36px;
   padding: 0 12px;
   border-color: var(--border);
   background: rgba(255, 255, 255, 0.06);
+  line-height: 1;
 }
 
 .command-button.danger {
@@ -911,7 +913,7 @@ button:disabled {
 
 .preset-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 20px auto;
+  grid-template-columns: minmax(0, 1fr) 20px minmax(84px, auto);
   align-items: center;
   gap: 10px;
   padding: 10px;
@@ -946,6 +948,15 @@ button:disabled {
 
 .preset-done {
   color: var(--green);
+}
+
+.preset-row .command-button {
+  min-width: 84px;
+  white-space: nowrap;
+}
+
+.preset-key-actions {
+  align-self: end;
 }
 
 .output-modal {

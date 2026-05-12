@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { CheckCircle2, KeyRound, Play, RefreshCw, TerminalSquare } from "lucide-react";
+import { CheckCircle2, KeyRound, Play, Plus, RefreshCw, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { PanelSetupInfo, ServerConfig } from "../types";
 import CommandOutputModal from "./CommandOutputModal";
@@ -7,7 +7,13 @@ import CommandOutputModal from "./CommandOutputModal";
 interface SetupPresetsProps {
   server: ServerConfig;
   onPanelInfoSaved?: (info: PanelSetupInfo) => void;
+  onServerUpdated?: (server: ServerConfig) => void | Promise<void>;
   onDone?: () => void;
+}
+
+interface SshKeyPair {
+  privateKeyPath: string;
+  publicKeyPath: string;
 }
 
 type PresetId =
@@ -94,7 +100,7 @@ const presets: PresetItem[] = [
   },
 ];
 
-export default function SetupPresets({ server, onPanelInfoSaved, onDone }: SetupPresetsProps) {
+export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated, onDone }: SetupPresetsProps) {
   const [selected, setSelected] = useState<Record<PresetId, boolean>>(() =>
     Object.fromEntries(presets.map((preset) => [preset.id, preset.recommended])) as Record<PresetId, boolean>,
   );
@@ -115,6 +121,8 @@ export default function SetupPresets({ server, onPanelInfoSaved, onDone }: Setup
   const [panelUsername, setPanelUsername] = useState(server.panelUser ?? "admin");
   const [panelPassword, setPanelPassword] = useState("");
   const [showPanelCredentialPrompt, setShowPanelCredentialPrompt] = useState(false);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [newKeyName, setNewKeyName] = useState(`nodenet_${server.id}_ed25519`);
 
   const selectedCount = useMemo(
     () => presets.filter((preset) => selected[preset.id]).length,
@@ -133,6 +141,10 @@ export default function SetupPresets({ server, onPanelInfoSaved, onDone }: Setup
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    setNewKeyName(`nodenet_${server.id}_ed25519`);
+  }, [server.id]);
 
   const runPreset = async (preset: PresetItem) => {
     setError("");
@@ -244,6 +256,31 @@ export default function SetupPresets({ server, onPanelInfoSaved, onDone }: Setup
     setMessage("3x-ui credentials saved in Keychain");
   };
 
+  const createAndLoadSshKey = async () => {
+    setCreatingKey(true);
+    setError("");
+    setMessage("");
+    try {
+      const keyPair = await invoke<SshKeyPair>("create_ssh_key_pair", {
+        serverId: server.id,
+        keyName: newKeyName,
+      });
+      setKeyPaths((current) => Array.from(new Set([keyPair.publicKeyPath, ...current])).sort());
+      setSelectedKeyPath(keyPair.publicKeyPath);
+      const updatedServer = { ...server, sshKeyPath: keyPair.privateKeyPath };
+      if (onServerUpdated) {
+        await onServerUpdated(updatedServer);
+      } else {
+        await invoke("upsert_server", { server: updatedServer });
+      }
+      setMessage(`SSH key created and loaded: ${keyPair.privateKeyPath}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
   return (
     <article className="settings-panel wide setup-presets">
       <div className="settings-panel-header split">
@@ -301,6 +338,16 @@ export default function SetupPresets({ server, onPanelInfoSaved, onDone }: Setup
             ))}
           </select>
         </label>
+        <label className="field">
+          <span>New key name</span>
+          <input value={newKeyName} onChange={(event) => setNewKeyName(event.target.value)} placeholder="nodenet_server_ed25519" />
+        </label>
+        <div className="settings-actions preset-key-actions">
+          <button className="command-button" disabled={creatingKey || running !== null || !newKeyName.trim()} onClick={() => void createAndLoadSshKey()}>
+            {creatingKey ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />}
+            <span>{creatingKey ? "Creating" : "Create and load new SSH key"}</span>
+          </button>
+        </div>
       </div>
 
       {showPanelCredentialPrompt ? (
