@@ -4,10 +4,6 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
 use tauri::AppHandle;
-use tokio::{
-    process::Command,
-    time::{timeout, Duration},
-};
 
 const METRICS_SCRIPT: &str = r#"
 read_cpu_stat() {
@@ -35,6 +31,9 @@ if [ -n "$CPU_SAMPLE_1" ]; then
       if (delta_total <= 0) {
         usage = 0;
       } else {
+        # CPU Usage is calculated from /proc/stat deltas as the percentage of
+        # non-idle CPU time during the polling interval. This is utilization,
+        # not Linux load average.
         usage = 100 * (delta_total - delta_idle) / delta_total;
       }
       if (usage < 0) usage = 0;
@@ -116,6 +115,7 @@ printf 'total_tx_bytes=%s\n' "$TX_BYTES"
 pub struct ServerMetrics {
     pub server_id: String,
     pub timestamp: DateTime<Utc>,
+    /// CPU Usage %, calculated from /proc/stat deltas. This is utilization, not Linux load average.
     pub cpu_percent: f64,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
@@ -138,7 +138,7 @@ pub struct ServerMetrics {
 pub async fn collect(app: &AppHandle, server: &ServerConfig) -> Result<ServerMetrics> {
     let (output, ping_ms) = tokio::join!(
         ssh::execute(app, server, METRICS_SCRIPT),
-        ping_host(&server.host)
+        ssh::ping_ms(app, server)
     );
     let mut metrics = parse_metrics(&server.id, &output?)?;
     metrics.ping_ms = ping_ms;
@@ -238,37 +238,6 @@ fn parse_load_average(raw: &str) -> Result<[f64; 3]> {
         *values.get(1).unwrap_or(&0.0),
         *values.get(2).unwrap_or(&0.0),
     ])
-}
-
-async fn ping_host(host: &str) -> Option<f64> {
-    let output = timeout(
-        Duration::from_secs(3),
-        Command::new("ping")
-            .args(["-c", "1", "-W", "2000", host])
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse_ping_ms(&combined)
-}
-
-fn parse_ping_ms(output: &str) -> Option<f64> {
-    output
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("time="))
-        .and_then(|value| value.trim_end_matches("ms").parse::<f64>().ok())
-        .map(round_one)
 }
 
 fn round_one(value: f64) -> f64 {

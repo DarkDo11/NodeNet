@@ -13,7 +13,6 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
-    net::TcpStream,
     process::Command,
     sync::Mutex,
     time::timeout,
@@ -181,56 +180,151 @@ pub async fn read_key_passphrase(app: &AppHandle, server: &ServerConfig) -> Resu
         .map(ToOwned::to_owned))
 }
 
-pub async fn ping(server: &ServerConfig) -> PingResult {
+pub async fn ping(app: &AppHandle, server: &ServerConfig) -> PingResult {
     let checked_at = Utc::now();
-    let started = Instant::now();
-    let bastion_host = server
-        .bastion_host
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let address = if let Some(host) = bastion_host {
-        (host, server.bastion_port.unwrap_or(22))
-    } else {
-        (server.host.as_str(), server.ssh_port)
-    };
-
-    match timeout(Duration::from_secs(3), TcpStream::connect(address)).await {
-        Ok(Ok(_stream)) => {
-            let latency_ms = started.elapsed().as_millis();
-            let status = if latency_ms > 1_000 {
+    match ping_ms(app, server).await {
+        Some(latency_ms) => {
+            let status = if latency_ms > 1_000.0 {
                 "warning"
             } else {
                 "online"
             };
-
             PingResult {
                 server_id: server.id.clone(),
-                latency_ms: Some(latency_ms),
+                latency_ms: Some(latency_ms.round() as u128),
                 status: status.to_string(),
-                message: if bastion_host.is_some() {
-                    "bastion tcp ok".to_string()
+                message: if has_bastion(server) {
+                    "bastion icmp ok".to_string()
                 } else {
-                    "tcp ok".to_string()
+                    "icmp ok".to_string()
                 },
                 checked_at,
             }
         }
-        Ok(Err(error)) => PingResult {
+        None => PingResult {
             server_id: server.id.clone(),
             latency_ms: None,
             status: "offline".to_string(),
-            message: error.to_string(),
-            checked_at,
-        },
-        Err(_) => PingResult {
-            server_id: server.id.clone(),
-            latency_ms: None,
-            status: "offline".to_string(),
-            message: "connection timeout".to_string(),
+            message: if has_bastion(server) {
+                "bastion ping failed".to_string()
+            } else {
+                "ping failed".to_string()
+            },
             checked_at,
         },
     }
+}
+
+pub async fn ping_ms(app: &AppHandle, server: &ServerConfig) -> Option<f64> {
+    if has_bastion(server) {
+        ping_from_bastion(app, server).await
+    } else {
+        ping_local(&server.host).await
+    }
+}
+
+async fn ping_local(host: &str) -> Option<f64> {
+    let output = timeout(
+        Duration::from_secs(3),
+        Command::new("ping")
+            .kill_on_drop(true)
+            .args(["-c", "1", "-W", "2000", host])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    parse_successful_ping_output(output)
+}
+
+async fn ping_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<f64> {
+    let host = bastion_host(server)?;
+    let user = bastion_user(server);
+    let port = server.bastion_port.unwrap_or(22);
+    let bastion_secret = read_bastion_password(app, server).await.ok().flatten();
+    let askpass_path = create_askpass_script(None, bastion_secret.as_deref(), server)
+        .ok()
+        .flatten();
+
+    let mut command = Command::new("ssh");
+    command
+        .kill_on_drop(true)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("-o")
+        .arg("BatchMode=no")
+        .arg("-o")
+        .arg("ConnectTimeout=3")
+        .arg("-o")
+        .arg("ServerAliveInterval=2")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey,password");
+
+    if let Some(key_path) = server
+        .bastion_ssh_key_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command
+            .arg("-i")
+            .arg(expand_tilde(key_path))
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+
+    if let Some(askpass_path) = &askpass_path {
+        command
+            .env("SSH_ASKPASS", askpass_path)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0");
+    }
+
+    command.arg(format!("{user}@{host}")).arg(format!(
+        "ping -c 1 -W 2 {}",
+        shell_single_quote(&server.host)
+    ));
+
+    let output = match timeout(Duration::from_secs(4), command.output()).await {
+        Ok(Ok(output)) => Some(output),
+        _ => None,
+    };
+
+    if let Some(path) = askpass_path {
+        let _ = fs::remove_file(path);
+    }
+
+    parse_successful_ping_output(output?)
+}
+
+fn parse_successful_ping_output(output: std::process::Output) -> Option<f64> {
+    if !output.status.success() {
+        return None;
+    }
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_ping_ms(&combined)
+}
+
+fn parse_ping_ms(output: &str) -> Option<f64> {
+    output
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("time="))
+        .and_then(|value| value.trim_end_matches("ms").parse::<f64>().ok())
+        .map(round_one)
+}
+
+fn round_one(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
 }
 
 pub async fn execute(
@@ -835,6 +929,10 @@ fn bastion_proxy_jump(server: &ServerConfig) -> Option<String> {
 
 fn bastion_route_id(server: &ServerConfig) -> Option<String> {
     bastion_proxy_command(server).or_else(|| bastion_proxy_jump(server))
+}
+
+fn has_bastion(server: &ServerConfig) -> bool {
+    bastion_host(server).is_some()
 }
 
 fn bastion_host(server: &ServerConfig) -> Option<&str> {

@@ -64,9 +64,12 @@ const latestPoint = (history: MetricPoint[]) => history[history.length - 1];
 
 const formatPing = (pingMs: number | null | undefined, isOnline: boolean | undefined) => {
   if (isOnline === false) return "Offline";
-  if (typeof pingMs !== "number") return "--";
+  if (typeof pingMs !== "number") return "—";
   return `${pingMs.toFixed(1)} ms`;
 };
+
+const formatPingChartValue = (value: number) =>
+  `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} ms`;
 
 const formatUptimePercent = (percent: number | null, totalPoints: number) => {
   if (percent === null || totalPoints < 3) return "--";
@@ -218,9 +221,9 @@ export default function Dashboard({
             <>
               <MetricCard
                 icon={<Cpu size={18} />}
-                label="CPU"
+                label="CPU Usage"
                 value={formatPercent(metrics?.cpuPercent)}
-                detail={`load ${metrics?.loadAverage.map((item) => item.toFixed(2)).join(" / ") ?? "0 / 0 / 0"}`}
+                detail="utilization"
                 accent="yellow"
                 index={0}
               />
@@ -286,13 +289,13 @@ export default function Dashboard({
 
       <section className="charts-grid">
         <MetricChart
-          title="CPU / RAM / Disk"
+          title="CPU Usage / RAM / Disk"
           data={history}
           range={selectedRange}
           domain={[0, 100]}
           unitFormatter={(value) => `${value.toFixed(0)}%`}
           series={[
-            { key: "cpu", name: "CPU", color: "#ffcc66" },
+            { key: "cpu", name: "CPU Usage", color: "#ffcc66" },
             { key: "ram", name: "RAM", color: "#51d88a" },
             { key: "disk", name: "Disk", color: "#57b9ff" },
           ]}
@@ -312,7 +315,7 @@ export default function Dashboard({
           data={history}
           range={selectedRange}
           domain={[0, "auto"]}
-          unitFormatter={(value) => `${value.toFixed(1)} ms`}
+          unitFormatter={formatPingChartValue}
           series={[{ key: "pingMs", name: "Ping", color: "#ffcc66" }]}
         />
       </section>

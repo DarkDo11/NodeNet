@@ -110,7 +110,7 @@ async fn poll_once(app: &AppHandle) -> Result<()> {
 }
 
 async fn poll_server(app: &AppHandle, server: crate::config::ServerConfig) -> Result<()> {
-    let ping_result = ssh::ping(&server).await;
+    let ping_result = ssh::ping(app, &server).await;
 
     if ping_result.status == "offline" {
         let should_emit = {

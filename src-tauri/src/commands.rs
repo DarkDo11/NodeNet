@@ -105,9 +105,9 @@ pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetr
 }
 
 #[tauri::command]
-pub async fn ping_server(server_id: String) -> Result<PingResult, String> {
+pub async fn ping_server(app: AppHandle, server_id: String) -> Result<PingResult, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    Ok(ping(&server).await)
+    Ok(ping(&app, &server).await)
 }
 
 #[tauri::command]
@@ -374,7 +374,7 @@ pub async fn test_server_connection(
         .map_err(|error| error.to_string())?;
     }
 
-    let ping_result = ping(&server).await;
+    let ping_result = ping(&app, &server).await;
     let (ssh_ok, ssh_message) = match collect(&app, &server).await {
         Ok(_) => (true, "SSH OK".to_string()),
         Err(error) => (false, error.to_string()),
