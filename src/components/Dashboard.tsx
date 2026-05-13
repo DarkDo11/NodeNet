@@ -221,9 +221,9 @@ export default function Dashboard({
             <>
               <MetricCard
                 icon={<Cpu size={18} />}
-                label="CPU Usage"
+                label="CPU Load"
                 value={formatPercent(metrics?.cpuPercent)}
-                detail="utilization"
+                detail={`load ${metrics?.loadAverage.map((item) => item.toFixed(2)).join(" / ") ?? "0 / 0 / 0"}`}
                 accent="yellow"
                 index={0}
               />
@@ -277,9 +277,9 @@ export default function Dashboard({
               />
               <MetricCard
                 icon={<Radio size={18} />}
-                label="Ping"
+                label="Google 204"
                 value={formatPing(pingMs, isOnline)}
-                detail={typeof pingMs === "number" ? "ICMP latency" : "unknown"}
+                detail={typeof pingMs === "number" ? "HTTP GET latency" : "unknown"}
                 accent="yellow"
                 index={7}
               />
@@ -289,13 +289,13 @@ export default function Dashboard({
 
       <section className="charts-grid">
         <MetricChart
-          title="CPU Usage / RAM / Disk"
+          title="CPU Load / RAM / Disk"
           data={history}
           range={selectedRange}
-          domain={[0, 100]}
+          domain={[0, "auto"]}
           unitFormatter={(value) => `${value.toFixed(0)}%`}
           series={[
-            { key: "cpu", name: "CPU Usage", color: "#ffcc66" },
+            { key: "cpu", name: "CPU Load", color: "#ffcc66" },
             { key: "ram", name: "RAM", color: "#51d88a" },
             { key: "disk", name: "Disk", color: "#57b9ff" },
           ]}
@@ -311,12 +311,12 @@ export default function Dashboard({
           ]}
         />
         <MetricChart
-          title="Ping"
+          title="Google 204 latency"
           data={history}
           range={selectedRange}
           domain={[0, "auto"]}
           unitFormatter={formatPingChartValue}
-          series={[{ key: "pingMs", name: "Ping", color: "#ffcc66" }]}
+          series={[{ key: "pingMs", name: "Google 204", color: "#ffcc66" }]}
         />
       </section>
 

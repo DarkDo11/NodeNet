@@ -45,7 +45,7 @@ export default function Sidebar({
 }: SidebarProps) {
   return (
     <aside className="sidebar">
-      <div className="brand-row" data-tauri-drag-region>
+      <div className="brand-row" data-window-drag data-tauri-drag-region>
         <div className="brand-mark">
           <ShieldCheck size={20} strokeWidth={2.2} />
         </div>

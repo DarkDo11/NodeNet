@@ -29,6 +29,7 @@ const SSH_CONNECT_TIMEOUT_SECS: u64 = 8;
 const SSH_COMMAND_TIMEOUT_SECS: u64 = 28;
 const SSH_RETRY_ATTEMPTS: usize = 3;
 const SSH_IDLE_TIMEOUT_SECS: u64 = 120;
+const GOOGLE_204_URL: &str = "https://www.gstatic.com/generate_204";
 
 type SshConnectionPool = Mutex<HashMap<String, Arc<Mutex<SshConnection>>>>;
 
@@ -214,9 +215,9 @@ pub async fn ping(app: &AppHandle, server: &ServerConfig) -> PingResult {
                 latency_ms: Some(latency_ms.round() as u128),
                 status: status.to_string(),
                 message: if has_bastion(server) {
-                    "bastion icmp ok".to_string()
+                    "bastion google 204 ok".to_string()
                 } else {
-                    "icmp ok".to_string()
+                    "google 204 ok".to_string()
                 },
                 checked_at,
             }
@@ -226,9 +227,9 @@ pub async fn ping(app: &AppHandle, server: &ServerConfig) -> PingResult {
             latency_ms: None,
             status: "offline".to_string(),
             message: if has_bastion(server) {
-                "bastion ping failed".to_string()
+                "bastion google 204 failed".to_string()
             } else {
-                "ping failed".to_string()
+                "google 204 failed".to_string()
             },
             checked_at,
         },
@@ -239,26 +240,30 @@ pub async fn ping_ms(app: &AppHandle, server: &ServerConfig) -> Option<f64> {
     if has_bastion(server) {
         ping_from_bastion(app, server).await
     } else {
-        ping_local(&server.host).await
+        ping_local().await
     }
 }
 
-async fn ping_local(host: &str) -> Option<f64> {
-    let output = timeout(
-        Duration::from_secs(3),
-        Command::new("ping")
-            .kill_on_drop(true)
-            .args(["-c", "1", "-W", "2000", host])
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+async fn ping_local() -> Option<f64> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let started = Instant::now();
+    let response = client.get(GOOGLE_204_URL).send().await.ok()?;
+    if response.status() != reqwest::StatusCode::NO_CONTENT {
+        return None;
+    }
 
-    parse_successful_ping_output(output)
+    Some(round_one(started.elapsed().as_secs_f64() * 1000.0))
 }
 
 async fn ping_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<f64> {
+    let output = google_204_from_bastion(app, server).await?;
+    parse_google_204_ms(&output)
+}
+
+async fn google_204_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<String> {
     let host = bastion_host(server)?;
     let user = bastion_user(server);
     let port = server.bastion_port.unwrap_or(22);
@@ -266,6 +271,10 @@ async fn ping_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<f64
     let askpass_path = create_askpass_script(None, bastion_secret.as_deref(), server)
         .ok()
         .flatten();
+    let remote_command = format!(
+        "curl -sS -o /dev/null -w 'status=%{{http_code}} time_total=%{{time_total}}\\n' --max-time 3 {}",
+        shell_single_quote(GOOGLE_204_URL)
+    );
 
     let mut command = Command::new("ssh");
     command
@@ -305,10 +314,7 @@ async fn ping_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<f64
             .env("DISPLAY", ":0");
     }
 
-    command.arg(format!("{user}@{host}")).arg(format!(
-        "ping -c 1 -W 2 {}",
-        shell_single_quote(&server.host)
-    ));
+    command.arg(format!("{user}@{host}")).arg(remote_command);
 
     let output = match timeout(Duration::from_secs(4), command.output()).await {
         Ok(Ok(output)) => Some(output),
@@ -319,28 +325,32 @@ async fn ping_from_bastion(app: &AppHandle, server: &ServerConfig) -> Option<f64
         let _ = fs::remove_file(path);
     }
 
-    parse_successful_ping_output(output?)
-}
-
-fn parse_successful_ping_output(output: std::process::Output) -> Option<f64> {
+    let output = output?;
     if !output.status.success() {
         return None;
     }
 
-    let combined = format!(
+    Some(format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-    parse_ping_ms(&combined)
+    ))
 }
 
-fn parse_ping_ms(output: &str) -> Option<f64> {
+fn parse_google_204_ms(output: &str) -> Option<f64> {
+    let status_ok = output
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("status="))
+        .is_some_and(|status| status == "204");
+    if !status_ok {
+        return None;
+    }
+
     output
         .split_whitespace()
-        .find_map(|part| part.strip_prefix("time="))
-        .and_then(|value| value.trim_end_matches("ms").parse::<f64>().ok())
-        .map(round_one)
+        .find_map(|part| part.strip_prefix("time_total="))
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|seconds| round_one(seconds * 1000.0))
 }
 
 fn round_one(value: f64) -> f64 {

@@ -1,6 +1,4 @@
 import { Archive, Power, RefreshCw, RotateCcw } from "lucide-react";
-import type { MouseEvent } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { GlobalTrafficStats, ServerConfig } from "../types";
 
 interface TopbarProps {
@@ -21,12 +19,6 @@ const formatBytes = (bytes: number) => {
   return `${bytes.toFixed(0)} B`;
 };
 
-const shouldStartWindowDrag = (event: MouseEvent<HTMLElement>) => {
-  if (event.button !== 0) return false;
-  const target = event.target as HTMLElement | null;
-  return !target?.closest("button, input, select, textarea, a, [data-no-window-drag]");
-};
-
 export default function Topbar({
   server,
   stats,
@@ -38,15 +30,8 @@ export default function Topbar({
 }: TopbarProps) {
   const disabled = !server || isRunningAction;
 
-  const startWindowDrag = (event: MouseEvent<HTMLElement>) => {
-    if (!shouldStartWindowDrag(event)) return;
-
-    event.preventDefault();
-    void getCurrentWindow().startDragging();
-  };
-
   return (
-    <header className="topbar" onMouseDown={startWindowDrag}>
+    <header className="topbar" data-window-drag data-tauri-drag-region>
       <div className="global-stats">
         <span data-tauri-drag-region>Day ↓ {formatBytes(stats.dayDown)}</span>
         <span data-tauri-drag-region>Day ↑ {formatBytes(stats.dayUp)}</span>

@@ -66,7 +66,7 @@ const formatLabel = (timestamp: number) =>
 
 const roundOne = (value: number) => Math.round(value * 10) / 10;
 
-const readCpuUsagePercent = (item: Record<string, unknown>) =>
+const readCpuLoadPercent = (item: Record<string, unknown>) =>
   roundOne(
     numberOr(
       item.cpu,
@@ -164,7 +164,7 @@ const normalizePoint = (serverId: string, raw: unknown): MetricPoint | null => {
   if (!raw || typeof raw !== "object") return null;
   const item = raw as Record<string, unknown>;
   const timestamp = parseTimestamp(item.timestamp);
-  const cpu = readCpuUsagePercent(item);
+  const cpu = readCpuLoadPercent(item);
   const ram = roundOne(numberOr(item.ram, item.ramPercent));
   const disk = roundOne(numberOr(item.disk, item.diskPercent));
   const totalRxBytes = numberOr(item.totalRxBytes, item.rxBytes);

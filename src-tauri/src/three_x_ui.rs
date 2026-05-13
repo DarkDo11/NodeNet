@@ -4,7 +4,7 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use directories::UserDirs;
 use futures::future::join_all;
-use reqwest::{Client, Method, StatusCode, Url};
+use reqwest::{header::HOST, Client, Method, RequestBuilder, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -41,11 +41,12 @@ struct PanelCredentials {
 
 #[derive(Debug, Clone)]
 pub struct PanelSession {
-    base_url: String,
+    request_base_url: String,
     client: Client,
     credentials: PanelCredentials,
     cache_key: Option<String>,
     tunnel_key: Option<String>,
+    host_header: Option<String>,
     uses_bastion: bool,
 }
 
@@ -470,9 +471,10 @@ pub async fn export_clients_csv(
 }
 
 struct PanelTransport {
-    base_url: String,
+    request_base_url: String,
     client: Client,
     tunnel_key: Option<String>,
+    host_header: Option<String>,
     uses_bastion: bool,
 }
 
@@ -490,8 +492,9 @@ async fn login_for_server(
 
     if let Err(error) = login_with_client(
         &transport.client,
-        &transport.base_url,
+        &transport.request_base_url,
         &credentials,
+        transport.host_header.as_deref(),
         transport.uses_bastion,
     )
     .await
@@ -501,11 +504,12 @@ async fn login_for_server(
     }
 
     Ok(PanelSession {
-        base_url: transport.base_url,
+        request_base_url: transport.request_base_url,
         client: transport.client,
         credentials,
         cache_key: Some(cache_key),
         tunnel_key: transport.tunnel_key,
+        host_header: transport.host_header,
         uses_bastion: transport.uses_bastion,
     })
 }
@@ -522,7 +526,9 @@ async fn build_panel_transport(
         .danger_accept_invalid_certs(!server.ssl_verify)
         .timeout(Duration::from_secs(16));
 
+    let mut request_base_url = base_url.clone();
     let mut tunnel_key = None;
+    let mut host_header = None;
     let uses_bastion = ssh::has_bastion(server);
     if uses_bastion {
         let host = parsed
@@ -537,10 +543,20 @@ async fn build_panel_transport(
             .await
             .with_context(|| format!("Cannot reach 3x-ui panel through bastion ({host}:{port})"))?;
 
-        // Keep requests addressed to the original panel host, preserving Host,
-        // TLS SNI, and certificate validation, while TCP connects to the local
-        // bastion tunnel endpoint.
-        builder = builder.resolve(&host, SocketAddr::from(([127, 0, 0, 1], local_port)));
+        if parsed.scheme() == "http" || !server.ssl_verify {
+            request_base_url = local_tunnel_url(&parsed, local_port)?;
+            host_header = Some(host_header_value(&parsed, &host, port));
+        } else {
+            if host.parse::<std::net::IpAddr>().is_ok() {
+                bail!(
+                    "3x-ui over bastion with strict TLS requires a panel hostname, or disabled SSL verification"
+                );
+            }
+            // Keep strict HTTPS requests addressed to the original panel host,
+            // preserving Host, TLS SNI, and certificate validation, while TCP
+            // connects to the local bastion tunnel endpoint.
+            builder = builder.resolve(&host, SocketAddr::from(([127, 0, 0, 1], local_port)));
+        }
         tunnel_key = Some(key);
     }
 
@@ -553,9 +569,10 @@ async fn build_panel_transport(
     })?;
 
     Ok(PanelTransport {
-        base_url,
+        request_base_url,
         client,
         tunnel_key,
+        host_header,
         uses_bastion,
     })
 }
@@ -639,8 +656,9 @@ impl PanelSession {
     async fn relogin(&mut self) -> Result<()> {
         login_with_client(
             &self.client,
-            &self.base_url,
+            &self.request_base_url,
             &self.credentials,
+            self.host_header.as_deref(),
             self.uses_bastion,
         )
         .await
@@ -679,7 +697,7 @@ impl PanelSession {
 
     async fn post_action(&mut self, path: &str, body: Option<Value>) -> Result<()> {
         for attempt in 0..=1 {
-            let mut request = self.client.request(Method::POST, self.url(path));
+            let mut request = self.request(Method::POST, path);
             if let Some(body) = &body {
                 request = request.json(body);
             }
@@ -728,7 +746,7 @@ impl PanelSession {
         T: DeserializeOwned,
     {
         for attempt in 0..=1 {
-            let mut request = self.client.request(method.clone(), self.url(path));
+            let mut request = self.request(method.clone(), path);
             if let Some(body) = &body {
                 request = request.json(body);
             }
@@ -775,7 +793,7 @@ impl PanelSession {
         body: Option<Value>,
     ) -> Result<Value> {
         for attempt in 0..=1 {
-            let mut request = self.client.request(method.clone(), self.url(path));
+            let mut request = self.request(method.clone(), path);
             if let Some(body) = &body {
                 request = request.json(body);
             }
@@ -824,14 +842,17 @@ impl PanelSession {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+        format!("{}{}", self.request_base_url, path)
     }
 
-    async fn send_request(
-        &self,
-        request: reqwest::RequestBuilder,
-        path: &str,
-    ) -> Result<reqwest::Response> {
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        apply_host_header(
+            self.client.request(method, self.url(path)),
+            self.host_header.as_deref(),
+        )
+    }
+
+    async fn send_request(&self, request: RequestBuilder, path: &str) -> Result<reqwest::Response> {
         match request.send().await {
             Ok(response) => Ok(response),
             Err(error) => {
@@ -848,18 +869,21 @@ impl PanelSession {
 
 async fn login_with_client(
     client: &Client,
-    base_url: &str,
+    request_base_url: &str,
     credentials: &PanelCredentials,
+    host_header: Option<&str>,
     uses_bastion: bool,
 ) -> Result<()> {
-    let response = match client
-        .post(format!("{base_url}/login"))
-        .json(&json!({
-            "username": credentials.username,
-            "password": credentials.password
-        }))
-        .send()
-        .await
+    let response = match apply_host_header(
+        client.post(format!("{request_base_url}/login")),
+        host_header,
+    )
+    .json(&json!({
+        "username": credentials.username,
+        "password": credentials.password
+    }))
+    .send()
+    .await
     {
         Ok(response) => response,
         Err(error) => {
@@ -1332,6 +1356,36 @@ fn normalize_panel_url(url: &str) -> Result<String> {
         Ok(trimmed.to_string())
     } else {
         Ok(format!("https://{trimmed}"))
+    }
+}
+
+fn local_tunnel_url(original: &Url, local_port: u16) -> Result<String> {
+    let mut url = original.clone();
+    url.set_host(Some("127.0.0.1"))
+        .map_err(|_| anyhow!("Bastion tunnel failed: invalid local panel URL"))?;
+    url.set_port(Some(local_port))
+        .map_err(|_| anyhow!("Bastion tunnel failed: invalid local panel port"))?;
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn host_header_value(original: &Url, host: &str, default_port: u16) -> String {
+    if let Some(port) = original.port() {
+        format!("{host}:{port}")
+    } else if is_default_port(original.scheme(), default_port) {
+        host.to_string()
+    } else {
+        format!("{host}:{default_port}")
+    }
+}
+
+fn is_default_port(scheme: &str, port: u16) -> bool {
+    matches!((scheme, port), ("http", 80) | ("https", 443))
+}
+
+fn apply_host_header(request: RequestBuilder, host_header: Option<&str>) -> RequestBuilder {
+    match host_header {
+        Some(host_header) => request.header(HOST, host_header),
+        None => request,
     }
 }
 

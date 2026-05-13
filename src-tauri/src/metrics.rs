@@ -6,68 +6,6 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 const METRICS_SCRIPT: &str = r#"
-read_cpu_stat() {
-  awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9; exit}' /proc/stat 2>/dev/null
-}
-
-CPU_SAMPLE_1=$(read_cpu_stat)
-if [ -n "$CPU_SAMPLE_1" ]; then
-  sleep 0.35
-  CPU_SAMPLE_2=$(read_cpu_stat)
-  CPU=$(awk -v a="$CPU_SAMPLE_1" -v b="$CPU_SAMPLE_2" '
-    BEGIN {
-      split(a, p, " ");
-      split(b, c, " ");
-      prev_idle = p[4] + p[5];
-      curr_idle = c[4] + c[5];
-      prev_total = 0;
-      curr_total = 0;
-      for (i = 1; i <= 8; i++) {
-        prev_total += p[i];
-        curr_total += c[i];
-      }
-      delta_total = curr_total - prev_total;
-      delta_idle = curr_idle - prev_idle;
-      if (delta_total <= 0) {
-        usage = 0;
-      } else {
-        # CPU Usage is calculated from /proc/stat deltas as the percentage of
-        # non-idle CPU time during the polling interval. This is utilization,
-        # not Linux load average.
-        usage = 100 * (delta_total - delta_idle) / delta_total;
-      }
-      if (usage < 0) usage = 0;
-      if (usage > 100) usage = 100;
-      printf "%.1f", usage;
-    }')
-else
-  CPU=$(top -bn1 | awk '
-    /Cpu\(s\)|%Cpu|CPU/ {
-      for (i = 1; i <= NF; i++) {
-        token = $i;
-        gsub(",", "", token);
-        if (token ~ /^(id|idle)$/ && i > 1) {
-          idle = $(i - 1);
-          gsub(",", "", idle);
-          usage = 100 - idle;
-          if (usage < 0) usage = 0;
-          if (usage > 100) usage = 100;
-          printf "%.1f", usage;
-          exit;
-        }
-        if (token ~ /^[0-9.]+id$/) {
-          idle = token;
-          sub(/id$/, "", idle);
-          usage = 100 - idle;
-          if (usage < 0) usage = 0;
-          if (usage > 100) usage = 100;
-          printf "%.1f", usage;
-          exit;
-        }
-      }
-    }')
-fi
-if [ -z "$CPU" ]; then CPU=0.0; fi
 read RAM_TOTAL RAM_USED <<EOF
 $(free -m | awk '/Mem:/ {print $2, $3}')
 EOF
@@ -75,6 +13,22 @@ read DISK_TOTAL DISK_USED DISK_PERCENT <<EOF
 $(df -h / | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5}')
 EOF
 LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
+LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
+CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
+if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ] 2>/dev/null; then CPU_CORES=1; fi
+CPU=$(awk -v load="$LOAD1" -v cores="$CPU_CORES" '
+  BEGIN {
+    # Normalized CPU load: Linux 1-minute load average divided by online CPU
+    # cores. 100% means load equals total core capacity; values above 100%
+    # mean the run queue exceeds available cores. This is load average, not
+    # /proc/stat utilization.
+    if (cores <= 0 || load < 0) {
+      normalized = 0;
+    } else {
+      normalized = (load / cores) * 100;
+    }
+    printf "%.1f", normalized;
+  }')
 UPTIME_SEC=$(cut -d. -f1 /proc/uptime)
 read RX_BYTES TX_BYTES <<EOF
 $(awk 'NR>2 {
@@ -97,6 +51,7 @@ $(awk 'NR>2 {
 }' /proc/net/dev)
 EOF
 printf 'cpu_percent=%s\n' "$CPU"
+printf 'cpu_cores=%s\n' "$CPU_CORES"
 printf 'ram_total_mb=%s\n' "$RAM_TOTAL"
 printf 'ram_used_mb=%s\n' "$RAM_USED"
 printf 'disk_total=%s\n' "$DISK_TOTAL"
@@ -115,7 +70,8 @@ printf 'total_tx_bytes=%s\n' "$TX_BYTES"
 pub struct ServerMetrics {
     pub server_id: String,
     pub timestamp: DateTime<Utc>,
-    /// CPU Usage %, calculated from /proc/stat deltas. This is utilization, not Linux load average.
+    /// Normalized CPU load %, calculated as load1 / online CPU cores * 100.
+    /// This is Linux load average, not /proc/stat utilization.
     pub cpu_percent: f64,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
@@ -184,7 +140,7 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
     Ok(ServerMetrics {
         server_id: server_id.to_string(),
         timestamp: Utc::now(),
-        cpu_percent: round_one(cpu_percent.clamp(0.0, 100.0)),
+        cpu_percent: round_one(cpu_percent.max(0.0)),
         ram_used_mb,
         ram_total_mb,
         ram_percent: round_one(ram_percent.clamp(0.0, 100.0)),

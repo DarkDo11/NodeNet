@@ -20,6 +20,17 @@ import { useServerStore } from "./stores/serverStore";
 import { useThreeXStore } from "./stores/threeXStore";
 import type { AppTheme, MetricPoint, ServerConfig, ThreeXClient } from "./types";
 
+const WINDOW_DRAG_SELECTOR = "[data-window-drag], [data-tauri-drag-region]";
+const NO_WINDOW_DRAG_SELECTOR =
+  "button, input, select, textarea, a, [contenteditable='true'], [data-no-window-drag]";
+
+const shouldStartWindowDrag = (event: PointerEvent) => {
+  if (event.button !== 0) return false;
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest(WINDOW_DRAG_SELECTOR)) return false;
+  return !target.closest(NO_WINDOW_DRAG_SELECTOR);
+};
+
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [onboardingSetupServerId, setOnboardingSetupServerId] = useState<string | null>(null);
@@ -242,6 +253,18 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectServer, servers]);
 
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!shouldStartWindowDrag(event)) return;
+
+      event.preventDefault();
+      void getCurrentWindow().startDragging();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, []);
+
   const saveServer = async (server: ServerConfig) => {
     await upsertServer(server);
     selectServer(server.id);
@@ -275,7 +298,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <div className="window-drag-strip" data-tauri-drag-region />
+      <div className="window-drag-strip" data-window-drag data-tauri-drag-region />
       <Sidebar
         servers={servers}
         selectedServerId={selectedServerId}

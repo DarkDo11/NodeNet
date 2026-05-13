@@ -37,7 +37,8 @@ export interface PingResult {
 export interface ServerMetrics {
   serverId: string;
   timestamp: string;
-  // CPU Usage %, calculated from /proc/stat deltas. Not Linux load average.
+  // Normalized CPU load %, calculated as load1 / online CPU cores * 100.
+  // This is Linux load average, not /proc/stat utilization.
   cpuPercent: number;
   ramUsedMb: number;
   ramTotalMb: number;
@@ -63,8 +64,8 @@ export interface MetricPoint {
   serverId: string;
   timestamp: number;
   label: string;
-  // cpu is CPU Usage %, calculated from /proc/stat deltas.
-  // It is not Linux load average.
+  // cpu is normalized CPU load %, calculated as load1 / online CPU cores * 100.
+  // It is Linux load average, not /proc/stat utilization.
   cpu: number;
   ram: number;
   disk: number;
