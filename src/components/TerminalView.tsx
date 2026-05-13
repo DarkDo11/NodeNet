@@ -61,22 +61,23 @@ export default function TerminalView({ server }: TerminalViewProps) {
 
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
+    const sessionId = crypto.randomUUID();
+    sessionRef.current = sessionId;
     setStatus("connecting");
     setMessage("Opening SSH PTY");
     terminal.writeln(`Connecting to ${server.name}...`);
 
     const connect = async () => {
-      const sessionId = await invoke<string>("terminal_connect", {
+      const connectedSessionId = await invoke<string>("terminal_connect", {
         serverId: server.id,
+        sessionId,
         cols: terminal.cols,
         rows: terminal.rows,
       });
       if (disposed) {
-        await invoke("terminal_disconnect", { sessionId });
+        await invoke("terminal_disconnect", { sessionId: connectedSessionId });
         return;
       }
-
-      sessionRef.current = sessionId;
     };
 
     const dataDisposable = terminal.onData((data) => {
@@ -111,7 +112,7 @@ export default function TerminalView({ server }: TerminalViewProps) {
       }),
     ]);
 
-    void connect().catch((error) => {
+    void unlistenersPromise.then(() => connect()).catch((error) => {
       setStatus("reconnecting");
       setMessage(error instanceof Error ? error.message : String(error));
     });

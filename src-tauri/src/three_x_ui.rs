@@ -23,6 +23,8 @@ const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
 const XRAY_API: &str = "/panel/api/xray";
+const XRAY_UPDATE_API: &str = "/panel/api/xray/update";
+const DEFAULT_OUTBOUND_TEST_URL: &str = "https://www.google.com/generate_204";
 const SESSION_TTL: Duration = Duration::from_secs(25 * 60);
 const PANEL_TUNNEL_TTL: Duration = Duration::from_secs(30 * 60);
 
@@ -141,6 +143,12 @@ struct RawClientTraffic {
     enable: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+struct XrayPanelSettings {
+    config: Value,
+    outbound_test_url: String,
+}
+
 pub async fn save_credentials(
     app: &AppHandle,
     server: &ServerConfig,
@@ -166,6 +174,28 @@ pub async fn delete_credentials(app: &AppHandle, server: &ServerConfig) -> Resul
     }
 }
 
+pub async fn read_saved_credentials(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Option<(String, String)>> {
+    let Some(credentials) = read_credentials_optional(app, server).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some((credentials.username, credentials.password)))
+}
+
+pub async fn clear_server_cache(server: &ServerConfig) {
+    let session_key = session_cache_key(server);
+    SESSION_CACHE.lock().await.remove(&session_key);
+
+    let tunnel_prefix = format!("{}|", server.id);
+    PANEL_TUNNELS
+        .lock()
+        .await
+        .retain(|key, _| !key.starts_with(&tunnel_prefix));
+}
+
 pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<ThreeXInbound>> {
     let mut session = PanelSession::for_server(app, server).await?;
     let raw = get_raw_inbounds(&mut session).await?;
@@ -174,12 +204,79 @@ pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<
 
 pub async fn get_xray_config(app: &AppHandle, server: &ServerConfig) -> Result<Value> {
     let mut session = PanelSession::for_server(app, server).await?;
-    session.get_value(XRAY_API).await
+    Ok(get_xray_panel_settings(&mut session).await?.config)
 }
 
 pub async fn save_xray_config(app: &AppHandle, server: &ServerConfig, config: Value) -> Result<()> {
     let mut session = PanelSession::for_server(app, server).await?;
-    session.post_action(XRAY_API, Some(config)).await
+    let outbound_test_url = get_xray_panel_settings(&mut session)
+        .await
+        .context("failed to read current Xray panel settings before save")?
+        .outbound_test_url;
+    let xray_setting = serde_json::to_string(&config).context("failed to serialize Xray config")?;
+    let form = vec![
+        ("xraySetting", xray_setting),
+        ("outboundTestUrl", outbound_test_url),
+    ];
+    session.post_form_action(XRAY_UPDATE_API, &form).await
+}
+
+async fn get_xray_panel_settings(session: &mut PanelSession) -> Result<XrayPanelSettings> {
+    let response = session.post_value(XRAY_API).await?;
+    parse_xray_panel_settings(response)
+}
+
+fn parse_xray_panel_settings(response: Value) -> Result<XrayPanelSettings> {
+    let value = decode_json_value(response).context("failed to parse Xray settings response")?;
+    let outbound_test_url = value
+        .get("outboundTestUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(DEFAULT_OUTBOUND_TEST_URL)
+        .to_string();
+
+    let config = if is_xray_config(&value) {
+        value
+    } else if let Some(setting) = value.get("xraySetting") {
+        decode_json_value(setting.clone()).context("failed to parse xraySetting")?
+    } else {
+        bail!("3x-ui Xray settings response did not include xraySetting");
+    };
+
+    if !is_xray_config(&config) {
+        bail!("3x-ui xraySetting does not look like an Xray config");
+    }
+
+    Ok(XrayPanelSettings {
+        config,
+        outbound_test_url,
+    })
+}
+
+fn decode_json_value(value: Value) -> Result<Value> {
+    match value {
+        Value::String(raw) => serde_json::from_str::<Value>(&raw)
+            .with_context(|| format!("failed to parse JSON string: {}", raw.trim())),
+        other => Ok(other),
+    }
+}
+
+fn is_xray_config(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    [
+        "inbounds",
+        "outbounds",
+        "routing",
+        "api",
+        "dns",
+        "log",
+        "policy",
+        "stats",
+    ]
+    .iter()
+    .any(|key| object.contains_key(*key))
 }
 
 pub async fn get_clients(
@@ -691,8 +788,8 @@ impl PanelSession {
         self.request_obj(Method::GET, path, None).await
     }
 
-    async fn get_value(&mut self, path: &str) -> Result<Value> {
-        self.request_value(Method::GET, path, None).await
+    async fn post_value(&mut self, path: &str) -> Result<Value> {
+        self.request_value(Method::POST, path, None).await
     }
 
     async fn post_action(&mut self, path: &str, body: Option<Value>) -> Result<()> {
@@ -701,6 +798,49 @@ impl PanelSession {
             if let Some(body) = &body {
                 request = request.json(body);
             }
+
+            let response = self.send_request(request, path).await?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+
+            if needs_relogin(status, &text) && attempt == 0 {
+                self.invalidate_cache().await;
+                self.relogin().await?;
+                self.refresh_cache().await;
+                continue;
+            }
+
+            if !status.is_success() {
+                bail!("3x-ui action failed ({status}): {}", text.trim());
+            }
+
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+
+            let envelope = parse_envelope::<Value>(&text)?;
+            if envelope.success == Some(false) {
+                if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
+                    self.invalidate_cache().await;
+                    self.relogin().await?;
+                    self.refresh_cache().await;
+                    continue;
+                }
+                bail!(
+                    "3x-ui action failed: {}",
+                    envelope.msg.unwrap_or_else(|| "unknown error".to_string())
+                );
+            }
+
+            return Ok(());
+        }
+
+        bail!("3x-ui action failed after relogin")
+    }
+
+    async fn post_form_action(&mut self, path: &str, form: &[(&str, String)]) -> Result<()> {
+        for attempt in 0..=1 {
+            let request = self.request(Method::POST, path).form(form);
 
             let response = self.send_request(request, path).await?;
             let status = response.status();
@@ -933,26 +1073,37 @@ async fn login_with_client(
 }
 
 async fn read_credentials(app: &AppHandle, server: &ServerConfig) -> Result<PanelCredentials> {
+    read_credentials_optional(app, server)
+        .await?
+        .context("3x-ui password is not saved in Keychain")
+}
+
+async fn read_credentials_optional(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Option<PanelCredentials>> {
     let account = keychain_account(server);
     let raw = match keychain::read_password(app, KEYCHAIN_SERVICE, &account).await? {
         Some(raw) => raw,
-        None => keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account)
-            .await?
-            .context("3x-ui password is not saved in Keychain")?,
+        None => match keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await? {
+            Some(raw) => raw,
+            None => return Ok(None),
+        },
     };
 
     if raw.starts_with('{') {
         return serde_json::from_str::<PanelCredentials>(&raw)
-            .context("failed to parse 3x-ui credentials from Keychain");
+            .context("failed to parse 3x-ui credentials from Keychain")
+            .map(Some);
     }
 
-    Ok(PanelCredentials {
+    Ok(Some(PanelCredentials {
         username: server
             .panel_user
             .clone()
             .unwrap_or_else(|| "admin".to_string()),
         password: raw,
-    })
+    }))
 }
 
 async fn get_raw_inbounds(session: &mut PanelSession) -> Result<Vec<RawInbound>> {
@@ -1479,4 +1630,66 @@ fn encode_component(input: &str) -> String {
             _ => format!("%{byte:02X}").chars().collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_xray_panel_wrapper_with_string_obj() {
+        let response = json!(
+            r#"{
+                "xraySetting": {
+                    "routing": { "rules": [] },
+                    "outbounds": [{ "tag": "direct", "protocol": "freedom" }]
+                },
+                "inboundTags": [],
+                "clientReverseTags": [],
+                "outboundTestUrl": "https://example.com/ping"
+            }"#
+        );
+
+        let settings = parse_xray_panel_settings(response).expect("settings should parse");
+
+        assert_eq!(
+            settings.config["outbounds"][0]["tag"].as_str(),
+            Some("direct")
+        );
+        assert_eq!(settings.outbound_test_url, "https://example.com/ping");
+    }
+
+    #[test]
+    fn parses_xray_panel_wrapper_with_string_xray_setting() {
+        let response = json!({
+            "xraySetting": r#"{
+                "routing": { "rules": [{ "type": "field", "outboundTag": "block" }] },
+                "outbounds": [{ "tag": "block", "protocol": "blackhole" }]
+            }"#,
+            "outboundTestUrl": ""
+        });
+
+        let settings = parse_xray_panel_settings(response).expect("settings should parse");
+
+        assert_eq!(
+            settings.config["routing"]["rules"][0]["outboundTag"].as_str(),
+            Some("block")
+        );
+        assert_eq!(settings.outbound_test_url, DEFAULT_OUTBOUND_TEST_URL);
+    }
+
+    #[test]
+    fn accepts_raw_xray_config() {
+        let response = json!({
+            "routing": { "rules": [] },
+            "outbounds": [{ "tag": "proxy", "protocol": "socks" }]
+        });
+
+        let settings = parse_xray_panel_settings(response).expect("settings should parse");
+
+        assert_eq!(
+            settings.config["outbounds"][0]["protocol"].as_str(),
+            Some("socks")
+        );
+    }
 }

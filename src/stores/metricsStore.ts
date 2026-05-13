@@ -416,6 +416,10 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
   },
 
   fetchMetrics: async (serverId) => {
+    if (get().pollingServers.has(serverId)) {
+      return;
+    }
+
     set((state) => {
       const pollingServers = new Set(state.pollingServers);
       pollingServers.add(serverId);
@@ -425,7 +429,11 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
     try {
       const metrics = await invoke<ServerMetrics>("get_metrics", { serverId });
       const previousHistory = get().historyByServer[serverId] ?? [];
-      const point = buildPoint(metrics, previousHistory[previousHistory.length - 1]);
+      const previousPoint = previousHistory[previousHistory.length - 1];
+      const point = buildPoint(metrics, previousPoint);
+      if (previousPoint && point.timestamp <= previousPoint.timestamp) {
+        return;
+      }
       const history = applyRetention([...previousHistory, point]);
       const historyByServer = {
         ...get().historyByServer,
@@ -447,7 +455,11 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
       void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
     } catch (error) {
       const previousHistory = get().historyByServer[serverId] ?? [];
-      const offlinePoint = buildOfflinePoint(serverId, previousHistory[previousHistory.length - 1]);
+      const previousPoint = previousHistory[previousHistory.length - 1];
+      const offlinePoint = buildOfflinePoint(serverId, previousPoint);
+      if (previousPoint && offlinePoint.timestamp <= previousPoint.timestamp) {
+        return;
+      }
       const history = applyRetention([...previousHistory, offlinePoint]);
       const historyByServer = {
         ...get().historyByServer,
@@ -467,6 +479,10 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
         pollingServers: withoutServer(state.pollingServers, serverId),
       }));
       void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
+    } finally {
+      set((state) => ({
+        pollingServers: withoutServer(state.pollingServers, serverId),
+      }));
     }
   },
 

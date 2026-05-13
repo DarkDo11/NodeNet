@@ -71,13 +71,17 @@ struct KnownHosts(HashMap<String, String>);
 #[tauri::command]
 pub async fn terminal_connect(
     server_id: String,
+    session_id: Option<String>,
     cols: u32,
     rows: u32,
     app: AppHandle,
     state: State<'_, TerminalState>,
 ) -> Result<String, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let (tx, rx) = mpsc::unbounded_channel();
 
     state.sessions.lock().await.insert(session_id.clone(), tx);

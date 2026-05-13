@@ -1,4 +1,5 @@
 use crate::{
+    alerts,
     config::{
         config_path, delete_server as delete_server_config, find_server, load_config, save_config,
         set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
@@ -7,8 +8,9 @@ use crate::{
     metrics::{collect, ServerMetrics},
     ssh::{
         self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
-        delete_password, ping, save_bastion_password as save_bastion_password_secret,
-        save_key_passphrase, save_password, PingResult,
+        delete_password, ping, read_saved_key_passphrase,
+        save_bastion_password as save_bastion_password_secret, save_key_passphrase, save_password,
+        PingResult,
     },
     three_x_ui::{self, ThreeXClient, ThreeXInbound},
 };
@@ -80,7 +82,40 @@ pub fn upsert_server(app: AppHandle, server: ServerConfig) -> Result<AppConfig, 
 }
 
 #[tauri::command]
-pub fn delete_server(app: AppHandle, server_id: String) -> Result<AppConfig, String> {
+pub async fn delete_server(app: AppHandle, server_id: String) -> Result<AppConfig, String> {
+    let server = load_config()
+        .map_err(|error| error.to_string())?
+        .servers
+        .into_iter()
+        .find(|server| server.id == server_id);
+
+    if let Some(server) = &server {
+        ssh::close_server_connections(server).await;
+        three_x_ui::clear_server_cache(server).await;
+        delete_password(&app, server)
+            .await
+            .map_err(|error| error.to_string())?;
+        delete_key_passphrase(&app, server)
+            .await
+            .map_err(|error| error.to_string())?;
+        if server
+            .bastion_host
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            delete_bastion_password_secret(&app, server)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        three_x_ui::delete_credentials(&app, server)
+            .await
+            .map_err(|error| error.to_string())?;
+        remove_server_from_metrics_cache(&server.id).map_err(|error| error.to_string())?;
+        alerts::remove_events_for_server(&app, &server.id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
     let config = delete_server_config(&server_id).map_err(|error| error.to_string())?;
     let _ = app.emit("servers-changed", ());
     Ok(config)
@@ -348,53 +383,130 @@ pub async fn test_server_connection(
     bastion_password: Option<String>,
     panel_password: Option<String>,
 ) -> Result<TestConnectionResult, String> {
-    if let Some(password) = ssh_password.filter(|value| !value.is_empty()) {
-        save_password(&app, &server, &password)
+    let ssh_password = ssh_password.filter(|value| !value.is_empty());
+    let ssh_key_passphrase = ssh_key_passphrase.filter(|value| !value.is_empty());
+    let bastion_password = bastion_password.filter(|value| !value.is_empty());
+    let panel_password = panel_password.filter(|value| !value.is_empty());
+
+    let previous_ssh_password = if ssh_password.is_some() {
+        ssh::read_password(&app, &server)
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    let previous_key_passphrase = if ssh_key_passphrase.is_some() {
+        read_saved_key_passphrase(&app, &server)
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    let previous_bastion_password = if bastion_password.is_some() {
+        ssh::read_bastion_password(&app, &server)
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    let previous_panel_credentials = if panel_password.is_some() {
+        three_x_ui::read_saved_credentials(&app, &server)
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+
+    let result = async {
+        if let Some(password) = &ssh_password {
+            save_password(&app, &server, password)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(passphrase) = &ssh_key_passphrase {
+            save_key_passphrase(&app, &server, passphrase)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(password) = &bastion_password {
+            save_bastion_password_secret(&app, &server, password)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(password) = &panel_password {
+            three_x_ui::save_credentials(
+                &app,
+                &server,
+                server.panel_user.as_deref().unwrap_or("admin"),
+                password,
+            )
             .await
             .map_err(|error| error.to_string())?;
+        }
+
+        let ping_result = ping(&app, &server).await;
+        let (ssh_ok, ssh_message) = match collect(&app, &server).await {
+            Ok(_) => (true, "SSH OK".to_string()),
+            Err(error) => (false, error.to_string()),
+        };
+        let (panel_ok, panel_message) = if server.panel_url.is_some() {
+            match three_x_ui::get_inbounds(&app, &server).await {
+                Ok(_) => (Some(true), Some("Panel OK".to_string())),
+                Err(error) => (Some(false), Some(error.to_string())),
+            }
+        } else {
+            (None, None)
+        };
+
+        Ok(TestConnectionResult {
+            ping: ping_result,
+            ssh_ok,
+            ssh_message,
+            panel_ok,
+            panel_message,
+        })
     }
-    if let Some(passphrase) = ssh_key_passphrase.filter(|value| !value.is_empty()) {
-        save_key_passphrase(&app, &server, &passphrase)
-            .await
-            .map_err(|error| error.to_string())?;
+    .await;
+
+    if ssh_password.is_some() || ssh_key_passphrase.is_some() || bastion_password.is_some() {
+        ssh::close_server_connections(&server).await;
     }
-    if let Some(password) = bastion_password.filter(|value| !value.is_empty()) {
-        save_bastion_password_secret(&app, &server, &password)
-            .await
-            .map_err(|error| error.to_string())?;
+    if panel_password.is_some() || bastion_password.is_some() {
+        three_x_ui::clear_server_cache(&server).await;
     }
-    if let Some(password) = panel_password.filter(|value| !value.is_empty()) {
-        three_x_ui::save_credentials(
-            &app,
-            &server,
-            server.panel_user.as_deref().unwrap_or("admin"),
-            &password,
-        )
-        .await
+
+    if ssh_password.is_some() {
+        match previous_ssh_password {
+            Some(password) => save_password(&app, &server, &password).await,
+            None => delete_password(&app, &server).await,
+        }
+        .map_err(|error| error.to_string())?;
+    }
+    if ssh_key_passphrase.is_some() {
+        match previous_key_passphrase {
+            Some(passphrase) => save_key_passphrase(&app, &server, &passphrase).await,
+            None => delete_key_passphrase(&app, &server).await,
+        }
+        .map_err(|error| error.to_string())?;
+    }
+    if bastion_password.is_some() {
+        match previous_bastion_password {
+            Some(password) => save_bastion_password_secret(&app, &server, &password).await,
+            None => delete_bastion_password_secret(&app, &server).await,
+        }
+        .map_err(|error| error.to_string())?;
+    }
+    if panel_password.is_some() {
+        match previous_panel_credentials {
+            Some((username, password)) => {
+                three_x_ui::save_credentials(&app, &server, &username, &password).await
+            }
+            None => three_x_ui::delete_credentials(&app, &server).await,
+        }
         .map_err(|error| error.to_string())?;
     }
 
-    let ping_result = ping(&app, &server).await;
-    let (ssh_ok, ssh_message) = match collect(&app, &server).await {
-        Ok(_) => (true, "SSH OK".to_string()),
-        Err(error) => (false, error.to_string()),
-    };
-    let (panel_ok, panel_message) = if server.panel_url.is_some() {
-        match three_x_ui::get_inbounds(&app, &server).await {
-            Ok(_) => (Some(true), Some("Panel OK".to_string())),
-            Err(error) => (Some(false), Some(error.to_string())),
-        }
-    } else {
-        (None, None)
-    };
-
-    Ok(TestConnectionResult {
-        ping: ping_result,
-        ssh_ok,
-        ssh_message,
-        panel_ok,
-        panel_message,
-    })
+    result
 }
 
 #[tauri::command]
@@ -645,6 +757,23 @@ pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
     let path = directory.join("metrics-cache.json");
     let raw = serde_json::to_string_pretty(&cache).map_err(|error| error.to_string())?;
     fs::write(path, raw).map_err(|error| error.to_string())
+}
+
+fn remove_server_from_metrics_cache(server_id: &str) -> anyhow::Result<()> {
+    let directory = crate::config::config_dir()?;
+    let path = directory.join("metrics-cache.json");
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let raw = fs::read_to_string(&path)?;
+    let mut cache = serde_json::from_str::<Value>(&raw)?;
+    if let Some(object) = cache.as_object_mut() {
+        object.remove(server_id);
+    }
+    let raw = serde_json::to_string_pretty(&cache)?;
+    fs::write(path, raw)?;
+    Ok(())
 }
 
 fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {

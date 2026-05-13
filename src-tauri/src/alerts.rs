@@ -73,6 +73,17 @@ pub async fn load_events_into_state(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+pub async fn remove_events_for_server(app: &AppHandle, server_id: &str) -> Result<()> {
+    let snapshot = {
+        let state = app.state::<AlertsState>();
+        let mut events = state.events.lock().await;
+        events.retain(|event| event.server_id.as_deref() != Some(server_id));
+        events.iter().cloned().collect::<Vec<_>>()
+    };
+
+    save_events(app, &snapshot).await
+}
+
 pub fn start_alert_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {

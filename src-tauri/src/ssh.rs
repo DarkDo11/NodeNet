@@ -46,6 +46,27 @@ pub struct SshTunnel {
     local_port: u16,
 }
 
+#[derive(Debug)]
+struct TempPathGuard {
+    path: PathBuf,
+}
+
+impl TempPathGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempPathGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl SshTunnel {
     pub fn local_port(&self) -> u16 {
         self.local_port
@@ -78,10 +99,28 @@ pub struct CommandOutputEvent {
 }
 
 pub fn keychain_account(server: &ServerConfig) -> String {
+    format!(
+        "{}:{}@{}:{}",
+        server.id, server.ssh_user, server.host, server.ssh_port
+    )
+}
+
+fn legacy_keychain_account(server: &ServerConfig) -> String {
     format!("{}@{}:{}", server.ssh_user, server.host, server.ssh_port)
 }
 
 pub fn bastion_keychain_account(server: &ServerConfig) -> Option<String> {
+    bastion_keychain_account_with_id(server, true)
+}
+
+fn legacy_bastion_keychain_account(server: &ServerConfig) -> Option<String> {
+    bastion_keychain_account_with_id(server, false)
+}
+
+fn bastion_keychain_account_with_id(
+    server: &ServerConfig,
+    include_server_id: bool,
+) -> Option<String> {
     let host = server.bastion_host.as_ref()?.trim();
     if host.is_empty() {
         return None;
@@ -94,7 +133,12 @@ pub fn bastion_keychain_account(server: &ServerConfig) -> Option<String> {
         .filter(|value| !value.is_empty())
         .unwrap_or(server.ssh_user.as_str());
     let port = server.bastion_port.unwrap_or(22);
-    Some(format!("{user}@{host}:{port}"))
+    let account = format!("{user}@{host}:{port}");
+    Some(if include_server_id {
+        format!("{}:{account}", server.id)
+    } else {
+        account
+    })
 }
 
 pub fn cleanup_stale_sockets() {
@@ -129,13 +173,14 @@ pub async fn save_password(app: &AppHandle, server: &ServerConfig, password: &st
 
 pub async fn delete_password(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
+    let legacy_account = legacy_keychain_account(server);
     let primary_result = keychain::delete_password(app, KEYCHAIN_SERVICE, &account).await;
-    let legacy_result = keychain::delete_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await;
+    let legacy_primary_result =
+        keychain::delete_password(app, KEYCHAIN_SERVICE, &legacy_account).await;
+    let legacy_result =
+        keychain::delete_password(app, LEGACY_KEYCHAIN_SERVICE, &legacy_account).await;
 
-    match (primary_result, legacy_result) {
-        (Ok(()), _) | (_, Ok(())) => Ok(()),
-        (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
-    }
+    primary_result.and(legacy_primary_result).and(legacy_result)
 }
 
 pub async fn read_password(app: &AppHandle, server: &ServerConfig) -> Result<Option<String>> {
@@ -144,7 +189,12 @@ pub async fn read_password(app: &AppHandle, server: &ServerConfig) -> Result<Opt
         return Ok(Some(password));
     }
 
-    keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await
+    let legacy_account = legacy_keychain_account(server);
+    if let Some(password) = keychain::read_password(app, KEYCHAIN_SERVICE, &legacy_account).await? {
+        return Ok(Some(password));
+    }
+
+    keychain::read_password(app, LEGACY_KEYCHAIN_SERVICE, &legacy_account).await
 }
 
 pub async fn save_bastion_password(
@@ -158,7 +208,14 @@ pub async fn save_bastion_password(
 
 pub async fn delete_bastion_password(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = bastion_keychain_account(server).context("bastion host is not configured")?;
-    keychain::delete_password(app, KEYCHAIN_BASTION_SERVICE, &account).await
+    let primary_result = keychain::delete_password(app, KEYCHAIN_BASTION_SERVICE, &account).await;
+    let legacy_result = match legacy_bastion_keychain_account(server) {
+        Some(legacy_account) => {
+            keychain::delete_password(app, KEYCHAIN_BASTION_SERVICE, &legacy_account).await
+        }
+        None => Ok(()),
+    };
+    primary_result.and(legacy_result)
 }
 
 pub async fn read_bastion_password(
@@ -169,7 +226,15 @@ pub async fn read_bastion_password(
         return Ok(None);
     };
 
-    keychain::read_password(app, KEYCHAIN_BASTION_SERVICE, &account).await
+    if let Some(password) = keychain::read_password(app, KEYCHAIN_BASTION_SERVICE, &account).await?
+    {
+        return Ok(Some(password));
+    }
+
+    let Some(legacy_account) = legacy_bastion_keychain_account(server) else {
+        return Ok(None);
+    };
+    keychain::read_password(app, KEYCHAIN_BASTION_SERVICE, &legacy_account).await
 }
 
 pub async fn save_key_passphrase(
@@ -183,12 +248,14 @@ pub async fn save_key_passphrase(
 
 pub async fn delete_key_passphrase(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
-    keychain::delete_password(app, KEYCHAIN_KEY_SERVICE, &account).await
+    let legacy_account = legacy_keychain_account(server);
+    let primary_result = keychain::delete_password(app, KEYCHAIN_KEY_SERVICE, &account).await;
+    let legacy_result = keychain::delete_password(app, KEYCHAIN_KEY_SERVICE, &legacy_account).await;
+    primary_result.and(legacy_result)
 }
 
 pub async fn read_key_passphrase(app: &AppHandle, server: &ServerConfig) -> Result<Option<String>> {
-    let account = keychain_account(server);
-    if let Some(passphrase) = keychain::read_password(app, KEYCHAIN_KEY_SERVICE, &account).await? {
+    if let Some(passphrase) = read_saved_key_passphrase(app, server).await? {
         return Ok(Some(passphrase));
     }
 
@@ -198,6 +265,19 @@ pub async fn read_key_passphrase(app: &AppHandle, server: &ServerConfig) -> Resu
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned))
+}
+
+pub async fn read_saved_key_passphrase(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Option<String>> {
+    let account = keychain_account(server);
+    if let Some(passphrase) = keychain::read_password(app, KEYCHAIN_KEY_SERVICE, &account).await? {
+        return Ok(Some(passphrase));
+    }
+
+    let legacy_account = legacy_keychain_account(server);
+    keychain::read_password(app, KEYCHAIN_KEY_SERVICE, &legacy_account).await
 }
 
 pub async fn ping(app: &AppHandle, server: &ServerConfig) -> PingResult {
@@ -256,7 +336,7 @@ pub async fn open_bastion_tunnel(
     let port = server.bastion_port.unwrap_or(22);
     let local_port = reserve_local_port().context("Bastion tunnel failed: no local port")?;
     let bastion_secret = read_bastion_password(app, server).await?;
-    let askpass_path = create_askpass_script(None, bastion_secret.as_deref(), server)
+    let askpass = create_askpass_script(None, bastion_secret.as_deref(), server)
         .context("Bastion tunnel failed: could not prepare SSH authentication")?;
 
     let mut command = Command::new("ssh");
@@ -300,9 +380,9 @@ pub async fn open_bastion_tunnel(
             .arg("IdentitiesOnly=yes");
     }
 
-    if let Some(askpass_path) = &askpass_path {
+    if let Some(askpass) = &askpass {
         command
-            .env("SSH_ASKPASS", askpass_path)
+            .env("SSH_ASKPASS", askpass.path())
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0");
     }
@@ -313,10 +393,6 @@ pub async fn open_bastion_tunnel(
         .spawn()
         .context("Bastion tunnel failed: could not start ssh")?;
     let ready = wait_for_tunnel(&mut child, local_port).await;
-
-    if let Some(path) = askpass_path {
-        let _ = fs::remove_file(path);
-    }
 
     ready?;
     Ok(SshTunnel { child, local_port })
@@ -677,21 +753,23 @@ async fn get_or_create_connection(
     server: &ServerConfig,
 ) -> Result<Arc<Mutex<SshConnection>>> {
     let account = connection_pool_account(server);
-    let existing = { SSH_POOL.lock().await.get(&account).cloned() };
-    if let Some(connection) = existing {
-        let alive = {
+    let mut pool = SSH_POOL.lock().await;
+    if let Some(connection) = pool.get(&account).cloned() {
+        let (is_fresh, control_path) = {
             let connection = connection.lock().await;
-            connection.last_used.elapsed() < Duration::from_secs(SSH_IDLE_TIMEOUT_SECS)
-                && is_connection_alive(server, &connection.control_path).await
+            (
+                connection.last_used.elapsed() < Duration::from_secs(SSH_IDLE_TIMEOUT_SECS),
+                connection.control_path.clone(),
+            )
         };
+        let alive = is_fresh && is_connection_alive(server, &control_path).await;
 
         if alive {
             return Ok(connection);
         }
 
-        let control_path = connection.lock().await.control_path.clone();
+        pool.remove(&account);
         close_master(server, &control_path).await;
-        SSH_POOL.lock().await.remove(&account);
     }
 
     let control_path = ssh_control_path()?;
@@ -700,11 +778,17 @@ async fn get_or_create_connection(
         control_path,
         last_used: Instant::now(),
     }));
-    SSH_POOL
-        .lock()
-        .await
-        .insert(account, Arc::clone(&connection));
+    pool.insert(account, Arc::clone(&connection));
     Ok(connection)
+}
+
+pub async fn close_server_connections(server: &ServerConfig) {
+    let account = connection_pool_account(server);
+    let connection = SSH_POOL.lock().await.remove(&account);
+    if let Some(connection) = connection {
+        let control_path = connection.lock().await.control_path.clone();
+        close_master(server, &control_path).await;
+    }
 }
 
 fn ssh_socket_dir() -> PathBuf {
@@ -731,7 +815,7 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
         read_password(app, server).await?
     };
     let bastion_secret = read_bastion_password(app, server).await?;
-    let askpass_path =
+    let askpass =
         create_askpass_script(target_secret.as_deref(), bastion_secret.as_deref(), server)?;
 
     let mut command = Command::new("ssh");
@@ -771,9 +855,9 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
 
     apply_bastion_proxy(&mut command, server);
 
-    if let Some(askpass_path) = &askpass_path {
+    if let Some(askpass) = &askpass {
         command
-            .env("SSH_ASKPASS", askpass_path)
+            .env("SSH_ASKPASS", askpass.path())
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0");
     }
@@ -787,10 +871,6 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
     .await
     .context("ssh master connection timed out")?
     .context("failed to start ssh master connection")?;
-
-    if let Some(path) = askpass_path {
-        let _ = fs::remove_file(path);
-    }
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -883,7 +963,7 @@ fn create_askpass_script(
     target_secret: Option<&str>,
     bastion_secret: Option<&str>,
     server: &ServerConfig,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<TempPathGuard>> {
     if target_secret.is_none() && bastion_secret.is_none() {
         return Ok(None);
     }
@@ -913,7 +993,7 @@ fn create_askpass_script(
         fs::set_permissions(&path, permissions)?;
     }
 
-    Ok(Some(path))
+    Ok(Some(TempPathGuard::new(path)))
 }
 
 fn apply_bastion_proxy(command: &mut Command, server: &ServerConfig) {

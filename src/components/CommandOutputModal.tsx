@@ -27,6 +27,7 @@ export default function CommandOutputModal({
   const outputRef = useRef("");
   const onCompleteRef = useRef(onComplete);
   const sessionIdRef = useRef(crypto.randomUUID());
+  const completedRef = useRef(false);
   const [running, setRunning] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -40,6 +41,11 @@ export default function CommandOutputModal({
     if (!host) return;
 
     let disposed = false;
+    sessionIdRef.current = crypto.randomUUID();
+    completedRef.current = false;
+    outputRef.current = "";
+    setRunning(true);
+    setError(null);
     const terminal = new Terminal({
       cursorBlink: false,
       disableStdin: true,
@@ -66,7 +72,8 @@ export default function CommandOutputModal({
     observer.observe(host);
 
     const finish = (nextError: string | null) => {
-      if (disposed) return;
+      if (disposed || completedRef.current) return;
+      completedRef.current = true;
       setError(nextError);
       setRunning(false);
       onCompleteRef.current?.(nextError);
@@ -83,13 +90,19 @@ export default function CommandOutputModal({
       }
     });
 
-    void invoke("run_streaming_command", {
-      serverId,
-      command,
-      sessionId: sessionIdRef.current,
-    })
-      .then(() => finish(null))
+    void unlistenPromise
+      .then(() =>
+        disposed
+          ? undefined
+          : invoke("run_streaming_command", {
+              serverId,
+              command,
+              sessionId: sessionIdRef.current,
+            }),
+      )
+      .then(() => undefined)
       .catch((err) => {
+        if (completedRef.current) return;
         const message = err instanceof Error ? err.message : String(err);
         terminal.writeln(message);
         outputRef.current = `${outputRef.current}${message}\n`;

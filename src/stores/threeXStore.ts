@@ -430,6 +430,10 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
         invoke<ThreeXInbound[]>("get_inbounds", { serverId: server.id }),
       ),
     );
+    if (results.some((result) => result.status === "rejected")) {
+      return;
+    }
+
     const totals = results
       .filter((result): result is PromiseFulfilledResult<ThreeXInbound[]> => result.status === "fulfilled")
       .map((result) => totalTraffic(result.value))

@@ -22,7 +22,7 @@ interface RoutingEditorProps {
   onSave: (config: XrayConfig) => Promise<void>;
 }
 
-type RuleKind = "field" | "domain" | "ip" | "port";
+type RuleKind = "domain" | "ip" | "port";
 type OutboundProtocol = "freedom" | "blackhole" | "socks" | "http";
 
 interface RuleForm {
@@ -234,7 +234,6 @@ export default function RoutingEditor({
                 <option value="domain">Domain</option>
                 <option value="ip">IP</option>
                 <option value="port">Port</option>
-                <option value="field">Field</option>
               </select>
             </label>
             <label className="field">
