@@ -41,12 +41,16 @@ export default function App() {
   const {
     metricsByServer,
     historyByServer,
+    selectedRange,
     pollIntervalSec,
     isPollingServer,
     errorByServer,
     setPollInterval,
+    setSelectedRange,
     fetchMetrics,
     loadMetricsCache,
+    getMetricsForRange,
+    getUptimeForRange,
   } = useMetricsStore();
   const {
     inboundsByServer,
@@ -124,6 +128,17 @@ export default function App() {
     selectedServerId && selectedInboundId !== null
       ? clientsByInbound[`${selectedServerId}:${selectedInboundId}`] ?? []
       : [];
+  const selectedMetricsHistory = useMemo(
+    () => (selectedServerId ? getMetricsForRange(selectedServerId, selectedRange) : []),
+    [getMetricsForRange, selectedRange, selectedServerId, historyByServer],
+  );
+  const selectedUptimeSummary = useMemo(
+    () =>
+      selectedServerId
+        ? getUptimeForRange(selectedServerId, selectedRange)
+        : { percent: null, offlineEvents: 0, totalPoints: 0 },
+    [getUptimeForRange, selectedRange, selectedServerId, historyByServer],
+  );
 
   useEffect(() => {
     void loadServers();
@@ -311,10 +326,13 @@ export default function App() {
             <Dashboard
               server={selectedServer}
               metrics={selectedServerId ? metricsByServer[selectedServerId] : undefined}
-              history={selectedServerId ? historyByServer[selectedServerId] ?? [] : []}
+              history={selectedMetricsHistory}
+              selectedRange={selectedRange}
+              uptimeSummary={selectedUptimeSummary}
               status={selectedServerId ? statusById[selectedServerId] : undefined}
               error={selectedServerId ? errorByServer[selectedServerId] : undefined}
               isPolling={selectedServerId ? isPollingServer(selectedServerId) : false}
+              onRangeChange={setSelectedRange}
               onRetry={() => {
                 if (selectedServerId) void fetchMetrics(selectedServerId);
               }}

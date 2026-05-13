@@ -14,7 +14,11 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize)]
@@ -618,7 +622,7 @@ fn sanitize_ssh_key_name(key_name: &str) -> Result<String, String> {
     }
 }
 
-fn public_key_path_for_private(private_key_path: &PathBuf) -> PathBuf {
+fn public_key_path_for_private(private_key_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.pub", private_key_path.display()))
 }
 

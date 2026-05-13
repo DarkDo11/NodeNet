@@ -49,12 +49,42 @@ export interface ServerMetrics {
   uptime: string;
   rxBytes: number;
   txBytes: number;
+  totalRxBytes?: number;
+  totalTxBytes?: number;
+  totalTrafficBytes?: number;
+  pingMs?: number | null;
+  isOnline?: boolean;
 }
 
-export interface MetricPoint extends ServerMetrics {
+export type MetricsRange = "all" | "1d" | "1w" | "1m" | "1y";
+
+export interface MetricPoint {
+  serverId: string;
+  timestamp: number;
   label: string;
+  cpu: number;
+  ram: number;
+  disk: number;
   rxRateBps: number;
   txRateBps: number;
+  totalRxBytes: number;
+  totalTxBytes: number;
+  totalTrafficBytes: number;
+  pingMs: number | null;
+  isOnline: boolean;
+  offlineEvents?: number;
+  cpuPercent: number;
+  ramUsedMb: number;
+  ramTotalMb: number;
+  ramPercent: number;
+  diskUsed: string;
+  diskTotal: string;
+  diskPercent: number;
+  loadAverage: [number, number, number];
+  uptimeSec: number;
+  uptime: string;
+  rxBytes: number;
+  txBytes: number;
 }
 
 export interface ThreeXInbound {

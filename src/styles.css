@@ -464,7 +464,41 @@ button:disabled {
 .header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
+}
+
+.range-selector {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.range-selector button {
+  min-width: 42px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  background: transparent;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.range-selector button:last-child {
+  border-right: 0;
+}
+
+.range-selector button.active {
+  color: var(--text);
+  background: rgba(81, 216, 138, 0.16);
 }
 
 .health-pill {
@@ -597,7 +631,7 @@ button:disabled {
 
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 14px;
 }
 
@@ -715,6 +749,7 @@ button:disabled {
 .chart-panel {
   display: flex;
   min-width: 0;
+  min-height: 320px;
   flex-direction: column;
   padding: 16px;
 }
@@ -742,6 +777,28 @@ button:disabled {
   min-height: 0;
   flex: 1;
   margin-top: 8px;
+}
+
+.chart-tooltip {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(18, 20, 26, 0.96);
+  padding: 10px 12px;
+  color: var(--text);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
+}
+
+.chart-tooltip strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-tooltip span {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
 }
 
 .chart-empty {

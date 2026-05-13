@@ -10,19 +10,27 @@ import {
   Gauge,
   HardDrive,
   MemoryStick,
+  Radio,
   Timer,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import MetricChart from "./MetricChart";
-import type { MetricPoint, PingResult, ServerConfig, ServerMetrics } from "../types";
+import type { MetricPoint, MetricsRange, PingResult, ServerConfig, ServerMetrics } from "../types";
 
 interface DashboardProps {
   server: ServerConfig | null;
   metrics: ServerMetrics | undefined;
   history: MetricPoint[];
+  selectedRange: MetricsRange;
+  uptimeSummary: {
+    percent: number | null;
+    offlineEvents: number;
+    totalPoints: number;
+  };
   status: PingResult | undefined;
   error: string | undefined;
   isPolling: boolean;
+  onRangeChange: (range: MetricsRange) => void;
   onRetry: () => void;
 }
 
@@ -45,14 +53,33 @@ const formatBytes = (bytes = 0) => {
   return `${bytes.toFixed(0)} B`;
 };
 
-const formatBits = (bits = 0) => {
-  if (bits >= 1_000_000_000) return `${(bits / 1_000_000_000).toFixed(1)} Gb/s`;
-  if (bits >= 1_000_000) return `${(bits / 1_000_000).toFixed(1)} Mb/s`;
-  if (bits >= 1_000) return `${(bits / 1_000).toFixed(1)} Kb/s`;
-  return `${bits.toFixed(0)} b/s`;
+const formatRate = (bytes = 0) => {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB/s`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB/s`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB/s`;
+  return `${bytes.toFixed(0)} B/s`;
 };
 
 const latestPoint = (history: MetricPoint[]) => history[history.length - 1];
+
+const formatPing = (pingMs: number | null | undefined, isOnline: boolean | undefined) => {
+  if (isOnline === false) return "Offline";
+  if (typeof pingMs !== "number") return "--";
+  return `${pingMs.toFixed(1)} ms`;
+};
+
+const formatUptimePercent = (percent: number | null, totalPoints: number) => {
+  if (percent === null || totalPoints < 3) return "--";
+  return `${percent.toFixed(percent >= 99.9 ? 2 : 1)}%`;
+};
+
+const ranges: Array<{ value: MetricsRange; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "1d", label: "1D" },
+  { value: "1w", label: "1W" },
+  { value: "1m", label: "1M" },
+  { value: "1y", label: "1Y" },
+];
 
 function MetricCard({
   icon,
@@ -107,9 +134,12 @@ export default function Dashboard({
   server,
   metrics,
   history,
+  selectedRange,
+  uptimeSummary,
   status,
   error,
   isPolling,
+  onRangeChange,
   onRetry,
 }: DashboardProps) {
   const point = latestPoint(history);
@@ -127,8 +157,13 @@ export default function Dashboard({
   }
 
   const trafficDetail = point
-    ? `${formatBytes(metrics?.rxBytes)} down · ${formatBytes(metrics?.txBytes)} up`
+    ? `${formatBytes(point.totalRxBytes)} down · ${formatBytes(point.totalTxBytes)} up`
     : "No traffic sample";
+  const pingMs = point?.pingMs ?? metrics?.pingMs ?? status?.latencyMs ?? null;
+  const isOnline = point?.isOnline ?? (status ? status.status !== "offline" : undefined);
+  const uptimeDetail = uptimeSummary.totalPoints < 3
+    ? "Not enough data"
+    : `${uptimeSummary.offlineEvents} offline event${uptimeSummary.offlineEvents === 1 ? "" : "s"} · ${uptimeSummary.totalPoints} pts`;
 
   return (
     <main className="content">
@@ -139,6 +174,17 @@ export default function Dashboard({
           <span className="server-target">{server.sshUser}@{server.host}:{server.sshPort}</span>
         </div>
         <div className="header-actions">
+          <div className="range-selector" aria-label="Metrics range">
+            {ranges.map((range) => (
+              <button
+                key={range.value}
+                className={selectedRange === range.value ? "active" : ""}
+                onClick={() => onRangeChange(range.value)}
+              >
+                {range.label}
+              </button>
+            ))}
+          </div>
           <span className={`health-pill ${status?.status ?? "unknown"}`}>
             {status?.status ?? "unknown"}
             {typeof status?.latencyMs === "number" ? ` · ${status.latencyMs} ms` : ""}
@@ -167,7 +213,7 @@ export default function Dashboard({
 
       <section className="metrics-grid">
         {showSkeletons
-          ? Array.from({ length: 6 }, (_, index) => <MetricSkeleton key={index} index={index} />)
+          ? Array.from({ length: 8 }, (_, index) => <MetricSkeleton key={index} index={index} />)
           : (
             <>
               <MetricCard
@@ -197,34 +243,78 @@ export default function Dashboard({
               <MetricCard
                 icon={<Timer size={18} />}
                 label="Uptime"
-                value={metrics?.uptime ?? "--"}
-                detail={isPolling ? "polling" : "idle"}
+                value={formatUptimePercent(uptimeSummary.percent, uptimeSummary.totalPoints)}
+                detail={uptimeDetail}
                 accent="neutral"
                 index={3}
               />
               <MetricCard
-                icon={<ArrowDown size={18} />}
-                label="Down"
-                value={formatBits(point?.rxRateBps)}
+                icon={<Database size={18} />}
+                label="Traffic total"
+                value={formatBytes(point?.totalTrafficBytes ?? metrics?.totalTrafficBytes ?? 0)}
                 detail={trafficDetail}
-                accent="green"
+                accent="blue"
                 index={4}
               />
               <MetricCard
-                icon={<ArrowUp size={18} />}
-                label="Up"
-                value={formatBits(point?.txRateBps)}
-                detail={trafficDetail}
-                accent="red"
+                icon={<ArrowDown size={18} />}
+                label="Download rate"
+                value={formatRate(point?.rxRateBps)}
+                detail="bytes per second"
+                accent="green"
                 index={5}
+              />
+              <MetricCard
+                icon={<ArrowUp size={18} />}
+                label="Upload rate"
+                value={formatRate(point?.txRateBps)}
+                detail="bytes per second"
+                accent="red"
+                index={6}
+              />
+              <MetricCard
+                icon={<Radio size={18} />}
+                label="Ping"
+                value={formatPing(pingMs, isOnline)}
+                detail={typeof pingMs === "number" ? "ICMP latency" : "unknown"}
+                accent="yellow"
+                index={7}
               />
             </>
           )}
       </section>
 
       <section className="charts-grid">
-        <MetricChart title="Traffic" data={history} variant="traffic" />
-        <MetricChart title="CPU history" data={history} variant="cpu" />
+        <MetricChart
+          title="CPU / RAM / Disk"
+          data={history}
+          range={selectedRange}
+          domain={[0, 100]}
+          unitFormatter={(value) => `${value.toFixed(0)}%`}
+          series={[
+            { key: "cpu", name: "CPU", color: "#ffcc66" },
+            { key: "ram", name: "RAM", color: "#51d88a" },
+            { key: "disk", name: "Disk", color: "#57b9ff" },
+          ]}
+        />
+        <MetricChart
+          title="Traffic rate"
+          data={history}
+          range={selectedRange}
+          unitFormatter={formatRate}
+          series={[
+            { key: "rxRateBps", name: "Download", color: "#51d88a", type: "area" },
+            { key: "txRateBps", name: "Upload", color: "#57b9ff", type: "area" },
+          ]}
+        />
+        <MetricChart
+          title="Ping"
+          data={history}
+          range={selectedRange}
+          domain={[0, "auto"]}
+          unitFormatter={(value) => `${value.toFixed(1)} ms`}
+          series={[{ key: "pingMs", name: "Ping", color: "#ffcc66" }]}
+        />
       </section>
 
       <footer className="dashboard-footer">
