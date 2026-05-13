@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 const METRICS_SCRIPT: &str = r#"
+export LC_ALL=C
 read RAM_TOTAL RAM_USED <<EOF
 $(free -m | awk '/Mem:/ {print $2, $3}')
 EOF
@@ -167,11 +168,11 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
 }
 
 fn parse_f64(values: &HashMap<String, String>, key: &str) -> Result<f64> {
-    values
+    let raw = values
         .get(key)
-        .with_context(|| format!("missing {key} metric"))?
-        .parse::<f64>()
-        .with_context(|| format!("invalid {key} metric"))
+        .with_context(|| format!("missing {key} metric"))?;
+
+    parse_decimal(raw).with_context(|| format!("invalid {key} metric"))
 }
 
 fn parse_u64(values: &HashMap<String, String>, key: &str) -> Result<u64> {
@@ -185,8 +186,8 @@ fn parse_u64(values: &HashMap<String, String>, key: &str) -> Result<u64> {
 fn parse_load_average(raw: &str) -> Result<[f64; 3]> {
     let values = raw
         .split_whitespace()
-        .map(str::parse::<f64>)
-        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(parse_decimal)
+        .collect::<Result<Vec<_>>>()
         .context("invalid load average")?;
 
     Ok([
@@ -194,6 +195,17 @@ fn parse_load_average(raw: &str) -> Result<[f64; 3]> {
         *values.get(1).unwrap_or(&0.0),
         *values.get(2).unwrap_or(&0.0),
     ])
+}
+
+fn parse_decimal(raw: &str) -> Result<f64> {
+    let normalized = raw.trim().replace(',', ".");
+    let value = normalized.parse::<f64>()?;
+
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        anyhow::bail!("non-finite value")
+    }
 }
 
 fn round_one(value: f64) -> f64 {
@@ -211,5 +223,62 @@ fn format_uptime(seconds: u64) -> String {
         format!("{hours}h {minutes}m")
     } else {
         format!("{minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_OUTPUT: &str = r#"
+cpu_percent=12.3
+cpu_cores=4
+ram_total_mb=2048
+ram_used_mb=1024
+disk_total=50G
+disk_used=20G
+disk_percent=40
+load_average=0.12 0.34 0.56
+uptime_sec=3661
+rx_bytes=100
+tx_bytes=200
+total_rx_bytes=1000
+total_tx_bytes=2000
+"#;
+
+    #[test]
+    fn parses_metrics_output() {
+        let metrics = parse_metrics("server-1", SAMPLE_OUTPUT).expect("metrics should parse");
+
+        assert_eq!(metrics.server_id, "server-1");
+        assert_eq!(metrics.cpu_percent, 12.3);
+        assert_eq!(metrics.ram_percent, 50.0);
+        assert_eq!(metrics.disk_percent, 40.0);
+        assert_eq!(metrics.load_average, [0.12, 0.34, 0.56]);
+        assert_eq!(metrics.total_traffic_bytes, 3000);
+        assert_eq!(metrics.uptime, "1h 1m");
+    }
+
+    #[test]
+    fn accepts_decimal_comma_metrics() {
+        let output = SAMPLE_OUTPUT
+            .replace("cpu_percent=12.3", "cpu_percent=12,3")
+            .replace("disk_percent=40", "disk_percent=40,5")
+            .replace("load_average=0.12 0.34 0.56", "load_average=0,12 0,34 0,56");
+
+        let metrics = parse_metrics("server-1", &output).expect("metrics should parse");
+
+        assert_eq!(metrics.cpu_percent, 12.3);
+        assert_eq!(metrics.disk_percent, 40.5);
+        assert_eq!(metrics.load_average, [0.12, 0.34, 0.56]);
+    }
+
+    #[test]
+    fn rejects_non_finite_metrics() {
+        let output = SAMPLE_OUTPUT.replace("cpu_percent=12.3", "cpu_percent=NaN");
+
+        let error = parse_metrics("server-1", &output).expect_err("metrics should fail");
+
+        assert!(error.to_string().contains("invalid cpu_percent metric"));
     }
 }
