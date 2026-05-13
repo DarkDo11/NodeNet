@@ -25,6 +25,7 @@ interface MetricChartProps {
   unitFormatter: (value: number) => string;
   domain?: [number | "auto", number | "auto"];
   emptyLabel?: string;
+  description?: string;
 }
 
 interface TooltipPayload {
@@ -101,13 +102,14 @@ export default function MetricChart({
   unitFormatter,
   domain = ["auto", "auto"],
   emptyLabel = "No metrics data yet",
+  description,
 }: MetricChartProps) {
   const hasData = data.length > 0;
 
   return (
     <section className="chart-panel">
       <div className="chart-header">
-        <h3>{title}</h3>
+        <h3 title={description}>{title}</h3>
         <span>{hasData ? `${data.length} pts` : "0 pts"}</span>
       </div>
       <div className="chart-body">

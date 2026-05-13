@@ -44,6 +44,7 @@ const cardVariants = {
 };
 
 const formatPercent = (value = 0) => `${value.toFixed(1)}%`;
+const CPU_LOAD_TOOLTIP = "loadavg 1m / CPU cores * 100";
 
 const formatBytes = (bytes = 0) => {
   if (bytes >= 1_000_000_000_000) return `${(bytes / 1_000_000_000_000).toFixed(1)} TB`;
@@ -91,6 +92,7 @@ function MetricCard({
   detail,
   accent,
   index,
+  tooltip,
 }: {
   icon: ReactNode;
   label: string;
@@ -98,6 +100,7 @@ function MetricCard({
   detail: string;
   accent: "green" | "blue" | "yellow" | "red" | "neutral";
   index: number;
+  tooltip?: string;
 }) {
   return (
     <motion.article
@@ -106,6 +109,8 @@ function MetricCard({
       initial="hidden"
       animate="visible"
       variants={cardVariants}
+      title={tooltip}
+      aria-label={tooltip ? `${label}: ${value}. ${tooltip}` : undefined}
     >
       <div className="metric-card-top">
         <span className="metric-icon">{icon}</span>
@@ -226,6 +231,7 @@ export default function Dashboard({
                 detail={`load ${metrics?.loadAverage.map((item) => item.toFixed(2)).join(" / ") ?? "0 / 0 / 0"}`}
                 accent="yellow"
                 index={0}
+                tooltip={CPU_LOAD_TOOLTIP}
               />
               <MetricCard
                 icon={<MemoryStick size={18} />}
@@ -290,6 +296,7 @@ export default function Dashboard({
       <section className="charts-grid">
         <MetricChart
           title="CPU Load / RAM / Disk"
+          description={CPU_LOAD_TOOLTIP}
           data={history}
           range={selectedRange}
           domain={[0, "auto"]}

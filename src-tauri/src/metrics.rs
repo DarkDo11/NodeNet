@@ -22,19 +22,13 @@ CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/
 if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ] 2>/dev/null; then CPU_CORES=1; fi
 CPU=$(awk -v load="$LOAD1" -v cores="$CPU_CORES" '
   BEGIN {
-    # Normalized CPU load: Linux 1-minute load average divided by online CPU
-    # cores. 100% means load equals total core capacity; values above 100%
-    # mean the run queue exceeds available cores. This is load average, not
-    # /proc/stat utilization.
     if (cores <= 0 || load < 0) {
-      normalized = 0;
-    } else {
-      normalized = (load / cores) * 100;
+      exit 1;
     }
-    printf "%.1f", normalized;
+    printf "%.1f", (load / cores) * 100;
   }')
 if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then
-  CPU=0
+  CPU=
 fi
 UPTIME_SEC=$(cut -d. -f1 /proc/uptime)
 read RX_BYTES TX_BYTES <<EOF
@@ -78,7 +72,6 @@ pub struct ServerMetrics {
     pub server_id: String,
     pub timestamp: DateTime<Utc>,
     /// Normalized CPU load %, calculated as load1 / online CPU cores * 100.
-    /// This is Linux load average, not /proc/stat utilization.
     pub cpu_percent: f64,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
@@ -129,7 +122,9 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         .unwrap_or(1)
         .max(1);
     let cpu_percent = parse_f64(&values, "cpu_percent")
-        .unwrap_or_else(|_| (load_average[0] / cpu_cores as f64) * 100.0);
+        .ok()
+        .filter(|value| *value >= 0.0)
+        .unwrap_or_else(|| (load_average[0] / cpu_cores as f64) * 100.0);
     let ram_total_mb = parse_u64(&values, "ram_total_mb")?;
     let ram_used_mb = parse_u64(&values, "ram_used_mb")?;
     let disk_percent = parse_f64(&values, "disk_percent")?;
@@ -153,7 +148,7 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
     Ok(ServerMetrics {
         server_id: server_id.to_string(),
         timestamp: Utc::now(),
-        cpu_percent: round_one(cpu_percent.max(0.0)),
+        cpu_percent: round_one(cpu_percent),
         ram_used_mb,
         ram_total_mb,
         ram_percent: round_one(ram_percent.clamp(0.0, 100.0)),
@@ -308,5 +303,17 @@ total_tx_bytes=2000
         let metrics = parse_metrics("server-1", &output).expect("metrics should parse");
 
         assert_eq!(metrics.cpu_percent, 75.0);
+    }
+
+    #[test]
+    fn falls_back_to_load_when_cpu_metric_is_negative() {
+        let output = SAMPLE_OUTPUT
+            .replace("cpu_percent=12.3", "cpu_percent=-1")
+            .replace("cpu_cores=4", "cpu_cores=2")
+            .replace("load_average=0.12 0.34 0.56", "load_average=0.50 0.34 0.56");
+
+        let metrics = parse_metrics("server-1", &output).expect("metrics should parse");
+
+        assert_eq!(metrics.cpu_percent, 25.0);
     }
 }

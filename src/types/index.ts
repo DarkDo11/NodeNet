@@ -38,7 +38,6 @@ export interface ServerMetrics {
   serverId: string;
   timestamp: string;
   // Normalized CPU load %, calculated as load1 / online CPU cores * 100.
-  // This is Linux load average, not /proc/stat utilization.
   cpuPercent: number;
   ramUsedMb: number;
   ramTotalMb: number;
@@ -64,8 +63,7 @@ export interface MetricPoint {
   serverId: string;
   timestamp: number;
   label: string;
-  // cpu is normalized CPU load %, calculated as load1 / online CPU cores * 100.
-  // It is Linux load average, not /proc/stat utilization.
+  // Normalized CPU load %, calculated as load1 / online CPU cores * 100.
   cpu: number;
   ram: number;
   disk: number;

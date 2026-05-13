@@ -124,7 +124,7 @@ export default function Sidebar({
           {servers.map((server) => {
           const status = statusById[server.id]?.status ?? "unknown";
           const latestMetrics = latestMetricsByServer[server.id];
-          const cpuPercent = latestMetrics?.cpuPercent ?? 0;
+          const cpuLoadPercent = latestMetrics?.cpuPercent ?? 0;
           const selected = selectedServerId === server.id;
 
           return (
@@ -145,8 +145,12 @@ export default function Sidebar({
               <span className="server-main">
                 <span className="server-name">{server.name}</span>
                 <span className="server-host">{server.sshUser}@{server.host}</span>
-                <span className="cpu-mini">
-                  <span style={{ width: `${Math.min(100, cpuPercent)}%` }} />
+                <span
+                  className="cpu-mini"
+                  title={`CPU Load: ${cpuLoadPercent.toFixed(1)}%. loadavg 1m / CPU cores * 100`}
+                  aria-label={`CPU Load: ${cpuLoadPercent.toFixed(1)}%. loadavg 1m / CPU cores * 100`}
+                >
+                  <span style={{ width: `${Math.max(0, cpuLoadPercent)}%` }} />
                 </span>
               </span>
               <span className={`status-dot ${status}`} />
