@@ -114,7 +114,7 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
         bastionPassword: bastionPassword || null,
         panelPassword: panelPassword || null,
       });
-      const ping = result.ping.latencyMs === null ? "Google 204 failed" : `${result.ping.latencyMs}ms`;
+      const ping = result.ping.latencyMs === null ? result.ping.message : `${result.ping.latencyMs}ms`;
       const panel = result.panelOk === null ? "" : ` / ${result.panelMessage}`;
       setTestMessage(`${ping} / ${result.sshMessage}${panel}`);
     } catch (err) {

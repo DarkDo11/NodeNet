@@ -1,6 +1,6 @@
 [package]
 name = "nodenet"
-version = "0.3.3"
+version = "0.3.4"
 description = "macOS desktop VPN server controller and monitor"
 authors = ["NodeNet"]
 edition = "2021"

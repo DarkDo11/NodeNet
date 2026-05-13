@@ -7,6 +7,9 @@ use tauri::AppHandle;
 
 const METRICS_SCRIPT: &str = r#"
 export LC_ALL=C
+export LANG=C
+export LANGUAGE=C
+export LC_NUMERIC=C
 read RAM_TOTAL RAM_USED <<EOF
 $(free -m | awk '/Mem:/ {print $2, $3}')
 EOF
@@ -30,6 +33,9 @@ CPU=$(awk -v load="$LOAD1" -v cores="$CPU_CORES" '
     }
     printf "%.1f", normalized;
   }')
+if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then
+  CPU=0
+fi
 UPTIME_SEC=$(cut -d. -f1 /proc/uptime)
 read RX_BYTES TX_BYTES <<EOF
 $(awk 'NR>2 {
@@ -112,7 +118,18 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         }
     }
 
-    let cpu_percent = parse_f64(&values, "cpu_percent")?;
+    let load_average = parse_load_average(
+        values
+            .get("load_average")
+            .context("missing load_average metric")?,
+    )?;
+    let cpu_cores = values
+        .get("cpu_cores")
+        .and_then(|value| parse_u64_value(value).ok())
+        .unwrap_or(1)
+        .max(1);
+    let cpu_percent = parse_f64(&values, "cpu_percent")
+        .unwrap_or_else(|_| (load_average[0] / cpu_cores as f64) * 100.0);
     let ram_total_mb = parse_u64(&values, "ram_total_mb")?;
     let ram_used_mb = parse_u64(&values, "ram_used_mb")?;
     let disk_percent = parse_f64(&values, "disk_percent")?;
@@ -127,11 +144,6 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         .get("total_tx_bytes")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(tx_bytes);
-    let load_average = parse_load_average(
-        values
-            .get("load_average")
-            .context("missing load_average metric")?,
-    )?;
     let ram_percent = if ram_total_mb == 0 {
         0.0
     } else {
@@ -176,11 +188,15 @@ fn parse_f64(values: &HashMap<String, String>, key: &str) -> Result<f64> {
 }
 
 fn parse_u64(values: &HashMap<String, String>, key: &str) -> Result<u64> {
-    values
+    let raw = values
         .get(key)
-        .with_context(|| format!("missing {key} metric"))?
-        .parse::<u64>()
-        .with_context(|| format!("invalid {key} metric"))
+        .with_context(|| format!("missing {key} metric"))?;
+
+    parse_u64_value(raw).with_context(|| format!("invalid {key} metric"))
+}
+
+fn parse_u64_value(raw: &str) -> Result<u64> {
+    raw.trim().parse::<u64>().map_err(Into::into)
 }
 
 fn parse_load_average(raw: &str) -> Result<[f64; 3]> {
@@ -274,11 +290,23 @@ total_tx_bytes=2000
     }
 
     #[test]
-    fn rejects_non_finite_metrics() {
+    fn falls_back_to_load_when_cpu_metric_is_non_finite() {
         let output = SAMPLE_OUTPUT.replace("cpu_percent=12.3", "cpu_percent=NaN");
 
-        let error = parse_metrics("server-1", &output).expect_err("metrics should fail");
+        let metrics = parse_metrics("server-1", &output).expect("metrics should parse");
 
-        assert!(error.to_string().contains("invalid cpu_percent metric"));
+        assert_eq!(metrics.cpu_percent, 3.0);
+    }
+
+    #[test]
+    fn falls_back_to_load_when_cpu_metric_is_blank() {
+        let output = SAMPLE_OUTPUT
+            .replace("cpu_percent=12.3", "cpu_percent=")
+            .replace("cpu_cores=4", "cpu_cores=2")
+            .replace("load_average=0.12 0.34 0.56", "load_average=1.50 0.34 0.56");
+
+        let metrics = parse_metrics("server-1", &output).expect("metrics should parse");
+
+        assert_eq!(metrics.cpu_percent, 75.0);
     }
 }
