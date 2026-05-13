@@ -4,12 +4,13 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use directories::UserDirs;
 use futures::future::join_all;
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Client, Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
+    net::SocketAddr,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -23,10 +24,13 @@ const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
 const XRAY_API: &str = "/panel/api/xray";
 const SESSION_TTL: Duration = Duration::from_secs(25 * 60);
+const PANEL_TUNNEL_TTL: Duration = Duration::from_secs(30 * 60);
 
 type SessionCache = Mutex<HashMap<String, (PanelSession, Instant)>>;
+type PanelTunnelCache = Mutex<HashMap<String, CachedPanelTunnel>>;
 
 static SESSION_CACHE: LazyLock<SessionCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PANEL_TUNNELS: LazyLock<PanelTunnelCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +45,14 @@ pub struct PanelSession {
     client: Client,
     credentials: PanelCredentials,
     cache_key: Option<String>,
+    tunnel_key: Option<String>,
+    uses_bastion: bool,
+}
+
+#[derive(Debug)]
+struct CachedPanelTunnel {
+    tunnel: ssh::SshTunnel,
+    last_used: Instant,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,35 +163,6 @@ pub async fn delete_credentials(app: &AppHandle, server: &ServerConfig) -> Resul
         (Ok(()), _) | (_, Ok(())) => Ok(()),
         (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
     }
-}
-
-async fn login_with_ssl(
-    url: &str,
-    user: &str,
-    pass: &str,
-    ssl_verify: bool,
-    cache_key: Option<String>,
-) -> Result<PanelSession> {
-    let base_url = normalize_panel_url(url)?;
-    let client = Client::builder()
-        .cookie_store(true)
-        .danger_accept_invalid_certs(!ssl_verify)
-        .timeout(Duration::from_secs(16))
-        .build()
-        .context("failed to create 3x-ui http client")?;
-    let credentials = PanelCredentials {
-        username: user.to_string(),
-        password: pass.to_string(),
-    };
-
-    login_with_client(&client, &base_url, &credentials).await?;
-
-    Ok(PanelSession {
-        base_url,
-        client,
-        credentials,
-        cache_key,
-    })
 }
 
 pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<ThreeXInbound>> {
@@ -486,30 +469,166 @@ pub async fn export_clients_csv(
     Ok(path.display().to_string())
 }
 
+struct PanelTransport {
+    base_url: String,
+    client: Client,
+    tunnel_key: Option<String>,
+    uses_bastion: bool,
+}
+
+async fn login_for_server(
+    app: &AppHandle,
+    server: &ServerConfig,
+    credentials: PanelCredentials,
+    cache_key: String,
+) -> Result<PanelSession> {
+    let panel_url = server
+        .panel_url
+        .as_deref()
+        .context("panelUrl is not configured for this server")?;
+    let transport = build_panel_transport(app, server, panel_url).await?;
+
+    if let Err(error) = login_with_client(
+        &transport.client,
+        &transport.base_url,
+        &credentials,
+        transport.uses_bastion,
+    )
+    .await
+    {
+        invalidate_panel_tunnel(transport.tunnel_key.as_deref()).await;
+        return Err(error);
+    }
+
+    Ok(PanelSession {
+        base_url: transport.base_url,
+        client: transport.client,
+        credentials,
+        cache_key: Some(cache_key),
+        tunnel_key: transport.tunnel_key,
+        uses_bastion: transport.uses_bastion,
+    })
+}
+
+async fn build_panel_transport(
+    app: &AppHandle,
+    server: &ServerConfig,
+    panel_url: &str,
+) -> Result<PanelTransport> {
+    let base_url = normalize_panel_url(panel_url)?;
+    let parsed = Url::parse(&base_url).context("panelUrl is invalid")?;
+    let mut builder = Client::builder()
+        .cookie_store(true)
+        .danger_accept_invalid_certs(!server.ssl_verify)
+        .timeout(Duration::from_secs(16));
+
+    let mut tunnel_key = None;
+    let uses_bastion = ssh::has_bastion(server);
+    if uses_bastion {
+        let host = parsed
+            .host_str()
+            .context("panelUrl must include a host for bastion tunnel")?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .context("panelUrl must include a port or http/https scheme")?;
+        let key = panel_tunnel_key(server, &base_url, &host, port);
+        let local_port = get_or_open_panel_tunnel(app, server, &key, &host, port)
+            .await
+            .with_context(|| format!("Cannot reach 3x-ui panel through bastion ({host}:{port})"))?;
+
+        // Keep requests addressed to the original panel host, preserving Host,
+        // TLS SNI, and certificate validation, while TCP connects to the local
+        // bastion tunnel endpoint.
+        builder = builder.resolve(&host, SocketAddr::from(([127, 0, 0, 1], local_port)));
+        tunnel_key = Some(key);
+    }
+
+    let client = builder.build().with_context(|| {
+        if uses_bastion {
+            "failed to create 3x-ui http client through bastion"
+        } else {
+            "failed to create 3x-ui http client"
+        }
+    })?;
+
+    Ok(PanelTransport {
+        base_url,
+        client,
+        tunnel_key,
+        uses_bastion,
+    })
+}
+
+async fn get_or_open_panel_tunnel(
+    app: &AppHandle,
+    server: &ServerConfig,
+    key: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<u16> {
+    let mut tunnels = PANEL_TUNNELS.lock().await;
+    cleanup_stale_panel_tunnels(&mut tunnels);
+
+    if let Some(cached) = tunnels.get_mut(key) {
+        cached.last_used = Instant::now();
+        return Ok(cached.tunnel.local_port());
+    }
+
+    let tunnel = ssh::open_bastion_tunnel(app, server, target_host, target_port)
+        .await
+        .context("Bastion tunnel failed")?;
+    let local_port = tunnel.local_port();
+    tunnels.insert(
+        key.to_string(),
+        CachedPanelTunnel {
+            tunnel,
+            last_used: Instant::now(),
+        },
+    );
+    Ok(local_port)
+}
+
+fn cleanup_stale_panel_tunnels(tunnels: &mut HashMap<String, CachedPanelTunnel>) {
+    let now = Instant::now();
+    tunnels.retain(|_, tunnel| now.duration_since(tunnel.last_used) < PANEL_TUNNEL_TTL);
+}
+
+async fn touch_panel_tunnel(key: Option<&str>) -> bool {
+    let Some(key) = key else {
+        return true;
+    };
+    let mut tunnels = PANEL_TUNNELS.lock().await;
+    cleanup_stale_panel_tunnels(&mut tunnels);
+    if let Some(tunnel) = tunnels.get_mut(key) {
+        tunnel.last_used = Instant::now();
+        true
+    } else {
+        false
+    }
+}
+
+async fn invalidate_panel_tunnel(key: Option<&str>) {
+    if let Some(key) = key {
+        PANEL_TUNNELS.lock().await.remove(key);
+    }
+}
+
 impl PanelSession {
     async fn for_server(app: &AppHandle, server: &ServerConfig) -> Result<Self> {
-        let cache_key = server.id.clone();
+        let cache_key = session_cache_key(server);
         let cached = { SESSION_CACHE.lock().await.get(&cache_key).cloned() };
         if let Some((session, cached_at)) = cached {
-            if cached_at.elapsed() < SESSION_TTL {
+            if cached_at.elapsed() < SESSION_TTL
+                && touch_panel_tunnel(session.tunnel_key.as_deref()).await
+            {
                 return Ok(session);
             }
             SESSION_CACHE.lock().await.remove(&cache_key);
         }
 
-        let panel_url = server
-            .panel_url
-            .as_deref()
-            .context("panelUrl is not configured for this server")?;
         let credentials = read_credentials(app, server).await?;
-        let session = login_with_ssl(
-            panel_url,
-            &credentials.username,
-            &credentials.password,
-            server.ssl_verify,
-            Some(cache_key.clone()),
-        )
-        .await?;
+        let session = login_for_server(app, server, credentials, cache_key.clone()).await?;
         SESSION_CACHE
             .lock()
             .await
@@ -518,7 +637,13 @@ impl PanelSession {
     }
 
     async fn relogin(&mut self) -> Result<()> {
-        login_with_client(&self.client, &self.base_url, &self.credentials).await
+        login_with_client(
+            &self.client,
+            &self.base_url,
+            &self.credentials,
+            self.uses_bastion,
+        )
+        .await
     }
 
     async fn refresh_cache(&self) {
@@ -534,6 +659,11 @@ impl PanelSession {
         if let Some(cache_key) = &self.cache_key {
             SESSION_CACHE.lock().await.remove(cache_key);
         }
+    }
+
+    async fn invalidate_transport(&self) {
+        self.invalidate_cache().await;
+        invalidate_panel_tunnel(self.tunnel_key.as_deref()).await;
     }
 
     async fn get_obj<T>(&mut self, path: &str) -> Result<T>
@@ -554,10 +684,7 @@ impl PanelSession {
                 request = request.json(body);
             }
 
-            let response = request
-                .send()
-                .await
-                .with_context(|| format!("3x-ui request failed: {path}"))?;
+            let response = self.send_request(request, path).await?;
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
@@ -606,10 +733,7 @@ impl PanelSession {
                 request = request.json(body);
             }
 
-            let response = request
-                .send()
-                .await
-                .with_context(|| format!("3x-ui request failed: {path}"))?;
+            let response = self.send_request(request, path).await?;
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
@@ -656,10 +780,7 @@ impl PanelSession {
                 request = request.json(body);
             }
 
-            let response = request
-                .send()
-                .await
-                .with_context(|| format!("3x-ui request failed: {path}"))?;
+            let response = self.send_request(request, path).await?;
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
@@ -705,14 +826,33 @@ impl PanelSession {
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
+
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+    ) -> Result<reqwest::Response> {
+        match request.send().await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.invalidate_transport().await;
+                Err(panel_send_error(
+                    error,
+                    self.uses_bastion,
+                    &format!("3x-ui request failed: {path}"),
+                ))
+            }
+        }
+    }
 }
 
 async fn login_with_client(
     client: &Client,
     base_url: &str,
     credentials: &PanelCredentials,
+    uses_bastion: bool,
 ) -> Result<()> {
-    let response = client
+    let response = match client
         .post(format!("{base_url}/login"))
         .json(&json!({
             "username": credentials.username,
@@ -720,11 +860,26 @@ async fn login_with_client(
         }))
         .send()
         .await
-        .context("3x-ui login request failed")?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(panel_send_error(
+                error,
+                uses_bastion,
+                "3x-ui login request failed",
+            ));
+        }
+    };
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
+        if uses_bastion {
+            bail!(
+                "3x-ui login failed through bastion ({status}): {}",
+                text.trim()
+            );
+        }
         bail!("3x-ui login failed ({status}): {}", text.trim());
     }
 
@@ -734,6 +889,14 @@ async fn login_with_client(
 
     let envelope = parse_envelope::<Value>(&text)?;
     if envelope.success == Some(false) {
+        if uses_bastion {
+            bail!(
+                "3x-ui login failed through bastion: {}",
+                envelope
+                    .msg
+                    .unwrap_or_else(|| "invalid credentials".to_string())
+            );
+        }
         bail!(
             "3x-ui login failed: {}",
             envelope
@@ -1169,6 +1332,70 @@ fn normalize_panel_url(url: &str) -> Result<String> {
         Ok(trimmed.to_string())
     } else {
         Ok(format!("https://{trimmed}"))
+    }
+}
+
+fn panel_send_error(error: reqwest::Error, uses_bastion: bool, context: &str) -> anyhow::Error {
+    let message = error.to_string();
+    if uses_bastion {
+        if is_tls_error(&message) {
+            anyhow!("Panel TLS verification failed through bastion: {message}")
+        } else if context.contains("login") {
+            anyhow!("3x-ui login failed through bastion: {message}")
+        } else {
+            anyhow!("Cannot reach 3x-ui panel through bastion: {message}")
+        }
+    } else {
+        anyhow!("{context}: {message}")
+    }
+}
+
+fn is_tls_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("certificate")
+        || lower.contains("tls")
+        || lower.contains("invalid peer")
+        || lower.contains("unknown issuer")
+        || lower.contains("not valid for name")
+}
+
+fn session_cache_key(server: &ServerConfig) -> String {
+    format!(
+        "{}|{}|ssl:{}|{}",
+        server.id,
+        server.panel_url.clone().unwrap_or_default(),
+        server.ssl_verify,
+        bastion_fingerprint(server)
+    )
+}
+
+fn panel_tunnel_key(
+    server: &ServerConfig,
+    base_url: &str,
+    target_host: &str,
+    target_port: u16,
+) -> String {
+    format!(
+        "{}|{base_url}|{target_host}:{target_port}|{}",
+        server.id,
+        bastion_fingerprint(server)
+    )
+}
+
+fn bastion_fingerprint(server: &ServerConfig) -> String {
+    let host = server.bastion_host.as_deref().unwrap_or_default();
+    let user = server
+        .bastion_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(server.ssh_user.as_str());
+    let port = server.bastion_port.unwrap_or(22);
+    let key = server.bastion_ssh_key_path.as_deref().unwrap_or_default();
+    if host.trim().is_empty() {
+        "direct".to_string()
+    } else {
+        format!("{user}@{host}:{port}|key:{key}")
     }
 }
 

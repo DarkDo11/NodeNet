@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, LazyLock},
@@ -13,9 +14,10 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
-    process::Command,
+    net::TcpStream,
+    process::{Child, Command},
     sync::Mutex,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -36,6 +38,24 @@ static SSH_POOL: LazyLock<SshConnectionPool> = LazyLock::new(|| Mutex::new(HashM
 pub struct SshConnection {
     control_path: PathBuf,
     last_used: Instant,
+}
+
+#[derive(Debug)]
+pub struct SshTunnel {
+    child: Child,
+    local_port: u16,
+}
+
+impl SshTunnel {
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,6 +345,112 @@ fn parse_ping_ms(output: &str) -> Option<f64> {
 
 fn round_one(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+pub async fn open_bastion_tunnel(
+    app: &AppHandle,
+    server: &ServerConfig,
+    target_host: &str,
+    target_port: u16,
+) -> Result<SshTunnel> {
+    let host = bastion_host(server).context("bastion host is not configured")?;
+    let user = bastion_user(server);
+    let port = server.bastion_port.unwrap_or(22);
+    let local_port = reserve_local_port().context("Bastion tunnel failed: no local port")?;
+    let bastion_secret = read_bastion_password(app, server).await?;
+    let askpass_path = create_askpass_script(None, bastion_secret.as_deref(), server)
+        .context("Bastion tunnel failed: could not prepare SSH authentication")?;
+
+    let mut command = Command::new("ssh");
+    command
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .arg("-N")
+        .arg("-L")
+        .arg(format!(
+            "127.0.0.1:{local_port}:{target_host}:{target_port}"
+        ))
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("-o")
+        .arg("BatchMode=no")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey,password");
+
+    if let Some(key_path) = server
+        .bastion_ssh_key_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command
+            .arg("-i")
+            .arg(expand_tilde(key_path))
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+
+    if let Some(askpass_path) = &askpass_path {
+        command
+            .env("SSH_ASKPASS", askpass_path)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0");
+    }
+
+    command.arg(format!("{user}@{host}"));
+
+    let mut child = command
+        .spawn()
+        .context("Bastion tunnel failed: could not start ssh")?;
+    let ready = wait_for_tunnel(&mut child, local_port).await;
+
+    if let Some(path) = askpass_path {
+        let _ = fs::remove_file(path);
+    }
+
+    ready?;
+    Ok(SshTunnel { child, local_port })
+}
+
+fn reserve_local_port() -> Result<u16> {
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).context("failed to bind local tunnel port")?;
+    Ok(listener.local_addr()?.port())
+}
+
+async fn wait_for_tunnel(child: &mut Child, local_port: u16) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("Bastion tunnel failed: could not inspect ssh process")?
+        {
+            bail!("Bastion tunnel failed: ssh exited with {status}");
+        }
+
+        if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
+            return Ok(());
+        }
+
+        if started.elapsed() >= Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS + 4) {
+            let _ = child.start_kill();
+            bail!("Bastion tunnel failed: connection timeout");
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub async fn execute(
@@ -931,7 +1057,7 @@ fn bastion_route_id(server: &ServerConfig) -> Option<String> {
     bastion_proxy_command(server).or_else(|| bastion_proxy_jump(server))
 }
 
-fn has_bastion(server: &ServerConfig) -> bool {
+pub fn has_bastion(server: &ServerConfig) -> bool {
     bastion_host(server).is_some()
 }
 
