@@ -1204,7 +1204,7 @@ code {
 .xray-json-editor {
   display: block;
   width: 100%;
-  min-height: 360px;
+  min-height: 560px;
   border: 0;
   border-top: 1px solid var(--border);
   padding: 14px;
@@ -1218,7 +1218,7 @@ code {
 }
 
 .xray-json-editor.full {
-  min-height: 560px;
+  min-height: 720px;
 }
 
 .xray-json-error {

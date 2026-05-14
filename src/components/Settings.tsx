@@ -64,6 +64,7 @@ export default function Settings({
   onDeleteServer,
 }: SettingsProps) {
   const [selectedServerId, setSelectedServerId] = useState<string>("");
+  const [isCreatingServer, setIsCreatingServer] = useState(false);
   const [form, setForm] = useState<ServerConfig>(emptyServer);
   const [password, setPassword] = useState("");
   const [keyPassphrase, setKeyPassphrase] = useState("");
@@ -86,10 +87,10 @@ export default function Settings({
   );
 
   useEffect(() => {
-    if (!selectedServerId && servers[0]) {
+    if (!selectedServerId && servers[0] && !isCreatingServer) {
       setSelectedServerId(servers[0].id);
     }
-  }, [selectedServerId, servers]);
+  }, [isCreatingServer, selectedServerId, servers]);
 
   useEffect(() => {
     setForm(selectedServer ? { ...emptyServer(), ...selectedServer } : emptyServer());
@@ -142,6 +143,7 @@ export default function Settings({
     try {
       const wasNew = !selectedServer;
       await onSaveServer(server);
+      setIsCreatingServer(false);
       setSelectedServerId(server.id);
       setMessage("Server saved");
       if (wasNew) {
@@ -210,6 +212,7 @@ export default function Settings({
     setError("");
     try {
       await onDeleteServer(selectedServer.id);
+      setIsCreatingServer(false);
       setSelectedServerId("");
       setMessage("Server deleted");
     } catch (err) {
@@ -286,8 +289,15 @@ export default function Settings({
         <button
           className="command-button"
           onClick={() => {
+            setIsCreatingServer(true);
             setSelectedServerId("");
             setForm(emptyServer());
+            setPassword("");
+            setKeyPassphrase("");
+            setBastionPassword("");
+            setPanelPassword("");
+            setMessage("");
+            setError("");
             setSetupServerId(null);
           }}
         >
@@ -334,7 +344,10 @@ export default function Settings({
             <select
               className="compact-select"
               value={selectedServerId}
-              onChange={(event) => setSelectedServerId(event.target.value)}
+              onChange={(event) => {
+                setIsCreatingServer(event.target.value === "");
+                setSelectedServerId(event.target.value);
+              }}
             >
               <option value="">New server</option>
               {servers.map((server) => (
@@ -558,7 +571,10 @@ export default function Settings({
               <button
                 key={server.id}
                 className={selectedServerId === server.id ? "server-table-row selected" : "server-table-row"}
-                onClick={() => setSelectedServerId(server.id)}
+                onClick={() => {
+                  setIsCreatingServer(false);
+                  setSelectedServerId(server.id);
+                }}
               >
                 <strong>{server.name}</strong>
                 <span>{server.country}</span>
