@@ -2,6 +2,7 @@ import {
   ArrowDown,
   ArrowUp,
   Code2,
+  Copy,
   Pencil,
   Plus,
   RefreshCw,
@@ -104,6 +105,7 @@ export default function RoutingEditor({
   const [routingFilePath, setRoutingFilePath] = useState("");
   const [routingFileName, setRoutingFileName] = useState("");
   const [routingFileMessage, setRoutingFileMessage] = useState("");
+  const maskedPanelUrl = useMemo(() => maskPanelUrl(server?.panelUrl), [server?.panelUrl]);
 
   useEffect(() => {
     if (config) {
@@ -235,6 +237,11 @@ export default function RoutingEditor({
     setRoutingFileMessage(remotePath);
   };
 
+  const copyPanelUrl = async () => {
+    if (!server?.panelUrl) return;
+    await navigator.clipboard.writeText(server.panelUrl);
+  };
+
   if (!server) {
     return (
       <main className="content">
@@ -252,7 +259,14 @@ export default function RoutingEditor({
         <div>
           <p className="eyebrow">3x-ui</p>
           <h2>Xray Settings</h2>
-          <span className="server-target">{server.panelUrl ?? "panelUrl is not configured"}</span>
+          <span className="server-target masked">
+            <span>{maskedPanelUrl ?? "panelUrl is not configured"}</span>
+            {server.panelUrl ? (
+              <button className="inline-icon-button" type="button" title="Copy panel URL" onClick={() => void copyPanelUrl()}>
+                <Copy size={13} />
+              </button>
+            ) : null}
+          </span>
         </div>
         <div className="header-actions">
           <button className="command-button" disabled={!server.panelUrl || isLoading} onClick={onRefresh}>
@@ -300,7 +314,10 @@ export default function RoutingEditor({
 
       {activeTab === "routing" ? (
       <>
-      <section className="routing-panel">
+      <section
+        className="routing-panel routing-rules-panel"
+        style={{ minHeight: `${100 + Math.max(ruleEntries.length, 1) * 56}px` }}
+      >
         <div className="routing-section-header">
           <div>
             <h3>Routing rules</h3>
@@ -398,7 +415,7 @@ export default function RoutingEditor({
         <div className="routing-section-header">
           <div>
             <h3>Routing files</h3>
-            <span>{routingFileMessage || `${server.host}:${"/usr/local/x-ui/bin"}`}</span>
+            <span>{routingFileMessage || (routingFilePath.trim() ? `${server.host}:${"/usr/local/x-ui/bin"}` : "Enter local .dat path to enable upload")}</span>
           </div>
           <button
             className="command-button"
@@ -667,6 +684,34 @@ const cloneConfig = (value: XrayConfig | JsonObject): XrayConfig =>
 
 const formatJson = (value: JsonValue | undefined) =>
   JSON.stringify(value ?? {}, null, 2);
+
+const maskPanelUrl = (value: string | null | undefined) => {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value);
+    const host = maskHost(url.hostname);
+    const port = url.port ? `:${url.port}` : "";
+    const path = url.pathname && url.pathname !== "/" ? "/..." : "";
+    return `${url.protocol}//${host}${port}${path}`;
+  } catch {
+    return "configured panel URL";
+  }
+};
+
+const maskHost = (host: string) => {
+  const ipParts = host.split(".");
+  if (ipParts.length === 4 && ipParts.every((part) => /^\d{1,3}$/.test(part))) {
+    return `${ipParts[0]}.${ipParts[1]}.*.*`;
+  }
+
+  const labels = host.split(".");
+  if (labels.length >= 3) {
+    return `*.${labels.slice(-2).join(".")}`;
+  }
+
+  return host.length > 4 ? `${host.slice(0, 2)}***` : "***";
+};
 
 const parseXrayJson = (value: string): XrayConfig => {
   const parsed = JSON.parse(value) as JsonValue;

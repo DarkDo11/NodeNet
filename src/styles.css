@@ -461,6 +461,19 @@ button:disabled {
   font-size: 12px;
 }
 
+.server-target.masked {
+  display: inline-flex;
+  max-width: min(520px, 100%);
+  align-items: center;
+  gap: 8px;
+}
+
+.server-target.masked > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -1162,11 +1175,16 @@ code {
 }
 
 .routing-panel {
+  flex-shrink: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
   backdrop-filter: blur(28px) saturate(1.2);
+}
+
+.routing-rules-panel {
+  min-height: max-content;
 }
 
 .xray-tabs {
@@ -1215,6 +1233,23 @@ code {
   font-size: 12px;
   line-height: 1.55;
   outline: none;
+}
+
+.inline-icon-button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.inline-icon-button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
 }
 
 .xray-json-editor.full {
