@@ -169,6 +169,7 @@ export interface PanelSetupInfo {
   port: number;
   username: string;
   password: string;
+  webBasePath: string;
   source: "cli" | "sqlite" | "fallback" | "default";
 }
 

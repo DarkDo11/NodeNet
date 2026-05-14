@@ -40,7 +40,8 @@ const presets: PresetItem[] = [
     id: "install3xui",
     name: "Install 3x-ui panel",
     description: "Panel will be configured on port 65333.",
-    command: "bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)",
+    command:
+      "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y sqlite3; elif command -v dnf >/dev/null 2>&1; then dnf install -y sqlite; elif command -v yum >/dev/null 2>&1; then yum install -y sqlite; elif command -v apk >/dev/null 2>&1; then apk add sqlite; fi; printf 'y\\n65333\\n4\\nN\\n' | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)",
     recommended: true,
   },
   {
@@ -56,7 +57,7 @@ const presets: PresetItem[] = [
     name: "Enable BBR congestion control",
     description: "Enables fq queueing and BBR TCP congestion control.",
     command:
-      'echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf && echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf && sysctl -p',
+      "printf 'net.core.default_qdisc=fq\\nnet.ipv4.tcp_congestion_control=bbr\\n' > /etc/sysctl.d/99-nodenet-bbr.conf && sysctl --system",
     recommended: true,
   },
   {
@@ -80,7 +81,7 @@ const presets: PresetItem[] = [
     name: "Harden SSH",
     description: "Disables password auth, enables public key auth, and restarts SSH.",
     command:
-      "sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && systemctl restart ssh",
+      "for file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do [ -f \"$file\" ] || continue; sed -i -E 's/^[#[:space:]]*PasswordAuthentication[[:space:]]+.*/PasswordAuthentication no/' \"$file\"; sed -i -E 's/^[#[:space:]]*PubkeyAuthentication[[:space:]]+.*/PubkeyAuthentication yes/' \"$file\"; sed -i -E 's/^[#[:space:]]*KbdInteractiveAuthentication[[:space:]]+.*/KbdInteractiveAuthentication no/' \"$file\"; done; printf 'PasswordAuthentication no\\nPubkeyAuthentication yes\\nKbdInteractiveAuthentication no\\n' > /etc/ssh/sshd_config.d/99-nodenet-hardening.conf && sshd -t && systemctl restart ssh",
     recommended: true,
   },
   {
@@ -207,6 +208,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
       }
       const ip = shellQuote(managementIp.trim());
       return [
+        "if ! command -v ufw >/dev/null 2>&1; then apt-get update && apt-get install -y ufw; fi",
         `ufw allow from ${ip} to any port 22`,
         "ufw delete allow 22/tcp || true",
         "ufw allow 65333/tcp",
@@ -239,7 +241,8 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
       return;
     }
     if (info.password) {
-      setMessage(`3x-ui panel saved from ${info.source}: ${info.username} on port ${info.port}`);
+      const path = normalizePanelBasePath(info.webBasePath);
+      setMessage(`3x-ui panel saved from ${info.source}: ${info.username} on port ${info.port}${path}`);
     }
     setShowPanelCredentialPrompt(!info.password);
   };
@@ -395,3 +398,8 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
 }
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+const normalizePanelBasePath = (value: string | null | undefined) => {
+  const trimmed = (value ?? "").trim().replace(/^\/+|\/+$/g, "");
+  return trimmed ? `/${trimmed}` : "";
+};

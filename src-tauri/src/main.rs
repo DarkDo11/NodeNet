@@ -87,6 +87,7 @@ fn main() {
             commands::run_streaming_command,
             commands::get_xray_config,
             commands::save_xray_config,
+            commands::upload_routing_file,
             commands::get_panel_setup_info_command,
             commands::list_ssh_public_keys,
             commands::read_ssh_public_key,

@@ -39,6 +39,7 @@ pub struct PanelSetupInfo {
     pub port: u16,
     pub username: String,
     pub password: String,
+    pub web_base_path: String,
     pub source: String,
 }
 
@@ -554,6 +555,19 @@ pub async fn save_xray_config(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn upload_routing_file(
+    app: AppHandle,
+    server_id: String,
+    local_path: String,
+    remote_filename: Option<String>,
+) -> Result<String, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    three_x_ui::upload_routing_file(&app, &server, &local_path, remote_filename)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename = "get_panel_setup_info")]
 pub async fn get_panel_setup_info_command(
     app: AppHandle,
@@ -570,7 +584,11 @@ pub async fn get_panel_setup_info_command(
         .iter_mut()
         .find(|existing| existing.id == server_id)
     {
-        existing.panel_url = Some(format!("http://{}:{}", existing.host, info.port));
+        existing.panel_url = Some(panel_url_from_setup_info(
+            &existing.host,
+            info.port,
+            &info.web_base_path,
+        ));
         existing.panel_user = Some(info.username.clone());
         server = existing.clone();
     }
@@ -589,25 +607,40 @@ pub async fn get_panel_setup_info(
     app: &AppHandle,
     server: &ServerConfig,
 ) -> anyhow::Result<PanelSetupInfo> {
+    ensure_xui_available(app, server).await?;
+
     let output = ssh::execute_combined(app, server, "x-ui settings 2>&1 || true", 60).await?;
     let mut info = parse_panel_setup_info(&output, "cli");
     if !info.password.is_empty() {
         return Ok(info);
     }
 
-    let sqlite_username = read_xui_sqlite_setting(app, server, "webUsername").await?;
+    let sqlite_username = read_xui_sqlite_setting(app, server, "webUsername")
+        .await?
+        .or(read_xui_sqlite_user(app, server).await?);
     let sqlite_password = read_xui_sqlite_setting(app, server, "webPassword").await?;
     let sqlite_port = read_xui_sqlite_setting(app, server, "webPort").await?;
+    let sqlite_web_base_path = read_xui_sqlite_setting(app, server, "webBasePath").await?;
+    let mut sqlite_found = false;
     if let Some(username) = sqlite_username {
         info.username = username;
+        sqlite_found = true;
     }
     if let Some(port) = sqlite_port.and_then(|value| value.parse::<u16>().ok()) {
         info.port = port;
+        sqlite_found = true;
+    }
+    if let Some(web_base_path) = sqlite_web_base_path {
+        info.web_base_path = normalize_panel_base_path(&web_base_path);
+        sqlite_found = true;
     }
     if let Some(password) = sqlite_password {
         info.password = password;
         info.source = "sqlite".to_string();
         return Ok(info);
+    }
+    if sqlite_found {
+        info.source = "sqlite".to_string();
     }
 
     let fallback_output = ssh::execute_combined(
@@ -624,8 +657,37 @@ pub async fn get_panel_setup_info(
         return Ok(info);
     }
 
-    info.source = "default".to_string();
+    if info.source == "cli" {
+        info.source = "default".to_string();
+    }
     Ok(info)
+}
+
+async fn ensure_xui_available(app: &AppHandle, server: &ServerConfig) -> anyhow::Result<()> {
+    let command = [
+        "command -v x-ui >/dev/null 2>&1",
+        "test -f /etc/x-ui/x-ui.db",
+        "test -f /usr/local/x-ui/config.json",
+        "systemctl list-unit-files 'x-ui.service' '3x-ui.service' --no-legend 2>/dev/null | grep -q .",
+    ]
+    .join(" || ");
+    let output = ssh::execute_combined(
+        app,
+        server,
+        &format!("{command}; printf 'xui_available=%s\\n' \"$?\""),
+        60,
+    )
+    .await?;
+    let available = output
+        .lines()
+        .find_map(|line| line.strip_prefix("xui_available="))
+        .is_some_and(|value| value.trim() == "0");
+
+    if available {
+        Ok(())
+    } else {
+        anyhow::bail!("3x-ui is not installed or is not visible on this server")
+    }
 }
 
 #[tauri::command]
@@ -780,6 +842,7 @@ fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {
     let mut port = None;
     let mut username = None;
     let mut password = None;
+    let mut web_base_path = None;
 
     for line in output.lines() {
         let lower = line.to_ascii_lowercase();
@@ -792,12 +855,18 @@ fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {
         if lower.contains("password") || lower.contains("pass") {
             password = password.or_else(|| value_after_separator(line));
         }
+        if lower.contains("webbasepath") || lower.contains("web base path") {
+            web_base_path = web_base_path.or_else(|| value_after_separator(line));
+        }
     }
 
     PanelSetupInfo {
         port: port.unwrap_or(65333),
         username: username.unwrap_or_else(|| "admin".to_string()),
         password: password.unwrap_or_default(),
+        web_base_path: web_base_path
+            .map(|value| normalize_panel_base_path(&value))
+            .unwrap_or_default(),
         source: source.to_string(),
     }
 }
@@ -811,7 +880,27 @@ async fn read_xui_sqlite_setting(
         "sqlite3 /etc/x-ui/x-ui.db \"SELECT value FROM settings WHERE key='{}' LIMIT 1;\" 2>/dev/null || true",
         key.replace('\'', "''")
     );
-    let output = ssh::execute_combined(app, server, &command, 60).await?;
+    read_xui_sqlite_value(app, server, &command).await
+}
+
+async fn read_xui_sqlite_user(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> anyhow::Result<Option<String>> {
+    read_xui_sqlite_value(
+        app,
+        server,
+        "sqlite3 /etc/x-ui/x-ui.db \"SELECT username FROM users ORDER BY id LIMIT 1;\" 2>/dev/null || true",
+    )
+    .await
+}
+
+async fn read_xui_sqlite_value(
+    app: &AppHandle,
+    server: &ServerConfig,
+    command: &str,
+) -> anyhow::Result<Option<String>> {
+    let output = ssh::execute_combined(app, server, command, 60).await?;
     Ok(output
         .lines()
         .map(str::trim)
@@ -829,19 +918,62 @@ fn merge_panel_setup_info(base: &mut PanelSetupInfo, candidate: PanelSetupInfo) 
     if base.password.is_empty() && !candidate.password.is_empty() {
         base.password = candidate.password;
     }
+    if base.web_base_path.is_empty() && !candidate.web_base_path.is_empty() {
+        base.web_base_path = candidate.web_base_path;
+    }
+}
+
+fn panel_url_from_setup_info(host: &str, port: u16, web_base_path: &str) -> String {
+    let base_path = normalize_panel_base_path(web_base_path);
+    if base_path.is_empty() {
+        format!("http://{host}:{port}")
+    } else {
+        format!("http://{host}:{port}{base_path}")
+    }
+}
+
+fn normalize_panel_base_path(value: &str) -> String {
+    let trimmed = value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("/{trimmed}")
+    }
 }
 
 fn value_after_separator(line: &str) -> Option<String> {
     line.split_once(':')
         .or_else(|| line.split_once('='))
         .map(|(_, value)| {
-            value
-                .trim()
+            strip_ansi_codes(value.trim())
                 .trim_matches('"')
                 .trim_matches('\'')
+                .trim()
                 .to_string()
         })
         .filter(|value| !value.is_empty())
+}
+
+fn strip_ansi_codes(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn first_u16(line: &str) -> Option<u16> {
@@ -861,4 +993,48 @@ fn expand_public_key_path(path: &str) -> Result<PathBuf, String> {
         return Ok(base_dirs.home_dir().join(rest));
     }
     Ok(PathBuf::from(trimmed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_panel_setup_info_with_web_base_path() {
+        let info = parse_panel_setup_info(
+            r#"
+Username: admin
+Password: secret
+Port: 65333
+WebBasePath: abc123/
+"#,
+            "cli",
+        );
+
+        assert_eq!(info.username, "admin");
+        assert_eq!(info.password, "secret");
+        assert_eq!(info.port, 65333);
+        assert_eq!(info.web_base_path, "/abc123");
+        assert_eq!(info.source, "cli");
+    }
+
+    #[test]
+    fn builds_panel_url_with_normalized_base_path() {
+        assert_eq!(
+            panel_url_from_setup_info("example.com", 65333, "/panel-base/"),
+            "http://example.com:65333/panel-base"
+        );
+        assert_eq!(
+            panel_url_from_setup_info("example.com", 65333, ""),
+            "http://example.com:65333"
+        );
+    }
+
+    #[test]
+    fn strips_ansi_codes_from_panel_values() {
+        assert_eq!(
+            value_after_separator("webBasePath: /abc/ \u{1b}[0m").as_deref(),
+            Some("/abc/")
+        );
+    }
 }

@@ -748,6 +748,92 @@ async fn download_file_once(
     Ok(())
 }
 
+pub async fn upload_file(
+    app: &AppHandle,
+    server: &ServerConfig,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<()> {
+    retry_ssh_operation(|| async { upload_file_once(app, server, local_path, remote_path).await })
+        .await
+}
+
+async fn upload_file_once(
+    app: &AppHandle,
+    server: &ServerConfig,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<()> {
+    if !local_path.is_file() {
+        bail!("local file does not exist: {}", local_path.display());
+    }
+
+    let connection = get_or_create_connection(app, server).await?;
+    let control_path = {
+        let mut connection = connection.lock().await;
+        connection.last_used = Instant::now();
+        connection.control_path.clone()
+    };
+
+    let batch_path = std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4()));
+    fs::write(
+        &batch_path,
+        format!(
+            "put {} {}\n",
+            sftp_quote(&local_path.display().to_string()),
+            sftp_quote(remote_path)
+        ),
+    )
+    .with_context(|| format!("failed to write sftp batch {}", batch_path.display()))?;
+
+    let mut command = Command::new("sftp");
+    command
+        .kill_on_drop(true)
+        .arg("-P")
+        .arg(server.ssh_port.to_string())
+        .arg("-o")
+        .arg("BatchMode=no")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!("ControlPath={}", control_path.display()))
+        .arg("-b")
+        .arg(&batch_path);
+
+    if let Some(key_path) = &server.ssh_key_path {
+        command
+            .arg("-i")
+            .arg(expand_tilde(key_path))
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+
+    apply_bastion_proxy(&mut command, server);
+
+    command.arg(format!("{}@{}", server.ssh_user, server.host));
+
+    let output = timeout(
+        Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .context("sftp upload timed out")?
+    .context("failed to execute sftp")?;
+
+    let _ = fs::remove_file(batch_path);
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "sftp upload failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
 async fn get_or_create_connection(
     app: &AppHandle,
     server: &ServerConfig,

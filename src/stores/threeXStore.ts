@@ -28,6 +28,7 @@ interface ThreeXState {
   loadClients: (serverId: string, inboundId: number) => Promise<void>;
   loadXrayConfig: (serverId: string) => Promise<void>;
   saveXrayConfig: (serverId: string, config: XrayConfig) => Promise<void>;
+  uploadRoutingFile: (serverId: string, localPath: string, remoteFilename?: string) => Promise<string>;
   addClient: (
     serverId: string,
     inboundId: number,
@@ -230,7 +231,7 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
           [serverId]: "",
         },
         isSavingXrayConfig: false,
-        actionMessage: "Routing saved",
+        actionMessage: "Routing saved and Xray restarted",
       }));
     } catch (error) {
       set((state) => ({
@@ -241,6 +242,26 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
         isSavingXrayConfig: false,
         actionMessage: error instanceof Error ? error.message : String(error),
       }));
+      throw error;
+    }
+  },
+
+  uploadRoutingFile: async (serverId, localPath, remoteFilename) => {
+    set({ isRunningAction: true, actionMessage: "" });
+    try {
+      const remotePath = await invoke<string>("upload_routing_file", {
+        serverId,
+        localPath,
+        remoteFilename: remoteFilename?.trim() || null,
+      });
+      set({
+        isRunningAction: false,
+        actionMessage: `Routing file uploaded to ${remotePath}`,
+      });
+      return remotePath;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ isRunningAction: false, actionMessage: message });
       throw error;
     }
   },

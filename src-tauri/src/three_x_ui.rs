@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     fs,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -22,9 +23,13 @@ use uuid::Uuid;
 const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
-const XRAY_API: &str = "/panel/api/xray";
-const XRAY_UPDATE_API: &str = "/panel/api/xray/update";
+const XRAY_CONFIG_API: &str = "/panel/api/server/getConfigJson";
+const XRAY_TEMPLATE_API: &str = "/panel/xray";
+const XRAY_UPDATE_API: &str = "/panel/xray/update";
+const SERVER_RESTART_XRAY_API: &str = "/panel/api/server/restartXrayService";
 const DEFAULT_OUTBOUND_TEST_URL: &str = "https://www.google.com/generate_204";
+const XUI_BIN_DIR: &str = "/usr/local/x-ui/bin";
+const XUI_BIN_CONFIG_PATH: &str = "/usr/local/x-ui/bin/config.json";
 const SESSION_TTL: Duration = Duration::from_secs(25 * 60);
 const PANEL_TUNNEL_TTL: Duration = Duration::from_secs(30 * 60);
 
@@ -46,6 +51,7 @@ pub struct PanelSession {
     request_base_url: String,
     client: Client,
     credentials: PanelCredentials,
+    csrf_token: Option<String>,
     cache_key: Option<String>,
     tunnel_key: Option<String>,
     host_header: Option<String>,
@@ -207,13 +213,42 @@ pub async fn get_xray_config(app: &AppHandle, server: &ServerConfig) -> Result<V
     Ok(get_xray_panel_settings(&mut session).await?.config)
 }
 
-pub async fn save_xray_config(app: &AppHandle, server: &ServerConfig, config: Value) -> Result<()> {
+pub async fn save_xray_config(
+    app: &AppHandle,
+    server: &ServerConfig,
+    mut config: Value,
+) -> Result<()> {
+    ensure_api_routing_rule(&mut config);
     let mut session = PanelSession::for_server(app, server).await?;
-    let outbound_test_url = get_xray_panel_settings(&mut session)
+    if let Err(panel_error) = save_xray_config_with_session(&mut session, &config).await {
+        save_xray_config_via_ssh(app, server, &config)
+            .await
+            .with_context(|| {
+                format!("3x-ui Xray settings API failed ({panel_error}); SSH fallback also failed")
+            })?;
+    }
+    restart_xray_with_session(app, server, &mut session).await
+}
+
+async fn get_xray_panel_settings(session: &mut PanelSession) -> Result<XrayPanelSettings> {
+    match session.post_value(XRAY_TEMPLATE_API).await {
+        Ok(response) => parse_xray_panel_settings(response),
+        Err(template_error) => {
+            let response = session
+                .get_value(XRAY_CONFIG_API)
+                .await
+                .with_context(|| format!("3x-ui Xray template API failed ({template_error})"))?;
+            parse_xray_panel_settings(response)
+        }
+    }
+}
+
+async fn save_xray_config_with_session(session: &mut PanelSession, config: &Value) -> Result<()> {
+    let outbound_test_url = get_xray_panel_settings(session)
         .await
         .context("failed to read current Xray panel settings before save")?
         .outbound_test_url;
-    let xray_setting = serde_json::to_string(&config).context("failed to serialize Xray config")?;
+    let xray_setting = serde_json::to_string(config).context("failed to serialize Xray config")?;
     let form = vec![
         ("xraySetting", xray_setting),
         ("outboundTestUrl", outbound_test_url),
@@ -221,9 +256,33 @@ pub async fn save_xray_config(app: &AppHandle, server: &ServerConfig, config: Va
     session.post_form_action(XRAY_UPDATE_API, &form).await
 }
 
-async fn get_xray_panel_settings(session: &mut PanelSession) -> Result<XrayPanelSettings> {
-    let response = session.post_value(XRAY_API).await?;
-    parse_xray_panel_settings(response)
+async fn save_xray_config_via_ssh(
+    app: &AppHandle,
+    server: &ServerConfig,
+    config: &Value,
+) -> Result<()> {
+    let raw = serde_json::to_string(config).context("failed to serialize Xray config")?;
+    let local_path =
+        std::env::temp_dir().join(format!("nodenet-xray-template-{}.json", Uuid::new_v4()));
+    fs::write(&local_path, raw)
+        .with_context(|| format!("failed to write {}", local_path.display()))?;
+
+    let remote_path = format!("/tmp/nodenet-xray-template-{}.json", Uuid::new_v4());
+    let upload_result = ssh::upload_file(app, server, &local_path, &remote_path).await;
+    let _ = fs::remove_file(&local_path);
+    upload_result?;
+
+    let command = format!(
+        "cd /usr/local/x-ui && ./bin/xray-linux-amd64 -test -config {} >/dev/null && python3 -c {} {} && rm -f {} && (systemctl restart x-ui || systemctl restart 3x-ui || systemctl restart xray)",
+        shell_single_quote(&remote_path),
+        shell_single_quote(
+            "import sqlite3,sys; value=open(sys.argv[1],encoding='utf-8').read(); db=sqlite3.connect('/etc/x-ui/x-ui.db'); db.execute('delete from settings where key=?', ('xrayTemplateConfig',)); db.execute('insert into settings(key,value) values(?,?)', ('xrayTemplateConfig', value)); db.commit(); db.close()"
+        ),
+        shell_single_quote(&remote_path),
+        shell_single_quote(&remote_path),
+    );
+    ssh::execute_combined(app, server, &command, 60).await?;
+    Ok(())
 }
 
 fn parse_xray_panel_settings(response: Value) -> Result<XrayPanelSettings> {
@@ -277,6 +336,58 @@ fn is_xray_config(value: &Value) -> bool {
     ]
     .iter()
     .any(|key| object.contains_key(*key))
+}
+
+fn ensure_api_routing_rule(config: &mut Value) {
+    let Some(config_object) = config.as_object_mut() else {
+        return;
+    };
+
+    let routing = config_object
+        .entry("routing")
+        .or_insert_with(|| json!({ "domainStrategy": "AsIs", "rules": [] }));
+    if !routing.is_object() {
+        *routing = json!({ "domainStrategy": "AsIs", "rules": [] });
+    }
+
+    let Some(routing_object) = routing.as_object_mut() else {
+        return;
+    };
+    let rules = routing_object
+        .entry("rules")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !rules.is_array() {
+        *rules = Value::Array(Vec::new());
+    }
+
+    let Some(rule_values) = rules.as_array_mut() else {
+        return;
+    };
+    let api_rule_index = rule_values.iter().position(is_api_routing_rule);
+    let api_rule = api_rule_index
+        .map(|index| rule_values.remove(index))
+        .unwrap_or_else(|| {
+            json!({
+                "type": "field",
+                "inboundTag": ["api"],
+                "outboundTag": "api",
+            })
+        });
+    rule_values.insert(0, api_rule);
+}
+
+fn is_api_routing_rule(rule: &Value) -> bool {
+    let Some(object) = rule.as_object() else {
+        return false;
+    };
+    if object.get("outboundTag").and_then(Value::as_str) != Some("api") {
+        return false;
+    }
+    match object.get("inboundTag") {
+        Some(Value::String(tag)) => tag == "api",
+        Some(Value::Array(tags)) => tags.iter().any(|tag| tag.as_str() == Some("api")),
+        _ => false,
+    }
 }
 
 pub async fn get_clients(
@@ -502,8 +613,30 @@ pub async fn generate_link(
 }
 
 pub async fn restart_xray(app: &AppHandle, server: &ServerConfig) -> Result<()> {
-    ssh::execute(app, server, "systemctl restart xray").await?;
-    Ok(())
+    let mut session = PanelSession::for_server(app, server).await?;
+    restart_xray_with_session(app, server, &mut session).await
+}
+
+async fn restart_xray_with_session(
+    app: &AppHandle,
+    server: &ServerConfig,
+    session: &mut PanelSession,
+) -> Result<()> {
+    match session.post_action(SERVER_RESTART_XRAY_API, None).await {
+        Ok(()) => Ok(()),
+        Err(panel_error) => {
+            ssh::execute(
+                app,
+                server,
+                "systemctl restart x-ui || systemctl restart 3x-ui || systemctl restart xray",
+            )
+            .await
+            .with_context(|| {
+                format!("3x-ui restart API failed ({panel_error}); SSH fallback also failed")
+            })?;
+            Ok(())
+        }
+    }
 }
 
 pub async fn reboot_server(app: &AppHandle, server: &ServerConfig) -> Result<()> {
@@ -526,11 +659,41 @@ pub async fn download_config(app: &AppHandle, server: &ServerConfig) -> Result<S
         Utc::now().format("%Y%m%d-%H%M%S")
     );
     let path = directory.join(filename);
-    ssh::download_file(app, server, "/usr/local/x-ui/config.json", &path).await?;
+    ssh::download_file(app, server, XUI_BIN_CONFIG_PATH, &path).await?;
     app.opener()
         .reveal_item_in_dir(&path)
         .context("failed to reveal backup in Finder")?;
     Ok(path.display().to_string())
+}
+
+pub async fn upload_routing_file(
+    app: &AppHandle,
+    server: &ServerConfig,
+    local_path: &str,
+    remote_filename: Option<String>,
+) -> Result<String> {
+    let local_path = expand_local_path(local_path);
+    let filename = validate_routing_filename(remote_filename.as_deref(), &local_path)?;
+    let remote_path = format!("{XUI_BIN_DIR}/{filename}");
+    let tmp_path = format!("{XUI_BIN_DIR}/.nodenet-upload-{filename}.tmp");
+
+    ssh::upload_file(app, server, &local_path, &tmp_path).await?;
+    let command = format!(
+        "chmod 644 {} && mv {} {}",
+        shell_single_quote(&tmp_path),
+        shell_single_quote(&tmp_path),
+        shell_single_quote(&remote_path)
+    );
+    ssh::execute_combined(app, server, &command, 60).await?;
+    ssh::execute_combined(
+        app,
+        server,
+        "systemctl restart x-ui || systemctl restart 3x-ui || systemctl restart xray",
+        60,
+    )
+    .await?;
+
+    Ok(remote_path)
 }
 
 pub async fn export_clients_csv(
@@ -587,7 +750,7 @@ async fn login_for_server(
         .context("panelUrl is not configured for this server")?;
     let transport = build_panel_transport(app, server, panel_url).await?;
 
-    if let Err(error) = login_with_client(
+    let csrf_token = match login_with_client(
         &transport.client,
         &transport.request_base_url,
         &credentials,
@@ -596,14 +759,18 @@ async fn login_for_server(
     )
     .await
     {
-        invalidate_panel_tunnel(transport.tunnel_key.as_deref()).await;
-        return Err(error);
-    }
+        Ok(csrf_token) => csrf_token,
+        Err(error) => {
+            invalidate_panel_tunnel(transport.tunnel_key.as_deref()).await;
+            return Err(error);
+        }
+    };
 
     Ok(PanelSession {
         request_base_url: transport.request_base_url,
         client: transport.client,
         credentials,
+        csrf_token,
         cache_key: Some(cache_key),
         tunnel_key: transport.tunnel_key,
         host_header: transport.host_header,
@@ -751,14 +918,15 @@ impl PanelSession {
     }
 
     async fn relogin(&mut self) -> Result<()> {
-        login_with_client(
+        self.csrf_token = login_with_client(
             &self.client,
             &self.request_base_url,
             &self.credentials,
             self.host_header.as_deref(),
             self.uses_bastion,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     async fn refresh_cache(&self) {
@@ -790,6 +958,10 @@ impl PanelSession {
 
     async fn post_value(&mut self, path: &str) -> Result<Value> {
         self.request_value(Method::POST, path, None).await
+    }
+
+    async fn get_value(&mut self, path: &str) -> Result<Value> {
+        self.request_value(Method::GET, path, None).await
     }
 
     async fn post_action(&mut self, path: &str, body: Option<Value>) -> Result<()> {
@@ -986,10 +1158,19 @@ impl PanelSession {
     }
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        apply_host_header(
+        let include_csrf =
+            method != Method::GET && method != Method::HEAD && method != Method::OPTIONS;
+        let mut request = apply_host_header(
             self.client.request(method, self.url(path)),
             self.host_header.as_deref(),
         )
+        .header("X-Requested-With", "XMLHttpRequest");
+        if include_csrf {
+            if let Some(csrf_token) = &self.csrf_token {
+                request = request.header("X-CSRF-Token", csrf_token);
+            }
+        }
+        request
     }
 
     async fn send_request(&self, request: RequestBuilder, path: &str) -> Result<reqwest::Response> {
@@ -1013,18 +1194,23 @@ async fn login_with_client(
     credentials: &PanelCredentials,
     host_header: Option<&str>,
     uses_bastion: bool,
-) -> Result<()> {
-    let response = match apply_host_header(
+) -> Result<Option<String>> {
+    let csrf_token = fetch_csrf_token(client, request_base_url, host_header).await?;
+    let form = [
+        ("username", credentials.username.clone()),
+        ("password", credentials.password.clone()),
+    ];
+    let mut request = apply_host_header(
         client.post(format!("{request_base_url}/login")),
         host_header,
     )
-    .json(&json!({
-        "username": credentials.username,
-        "password": credentials.password
-    }))
-    .send()
-    .await
-    {
+    .header("X-Requested-With", "XMLHttpRequest")
+    .form(&form);
+    if let Some(csrf_token) = &csrf_token {
+        request = request.header("X-CSRF-Token", csrf_token);
+    }
+
+    let response = match request.send().await {
         Ok(response) => response,
         Err(error) => {
             return Err(panel_send_error(
@@ -1048,7 +1234,7 @@ async fn login_with_client(
     }
 
     if text.trim().is_empty() {
-        return Ok(());
+        return Ok(csrf_token);
     }
 
     let envelope = parse_envelope::<Value>(&text)?;
@@ -1069,7 +1255,52 @@ async fn login_with_client(
         );
     }
 
-    Ok(())
+    Ok(csrf_token)
+}
+
+async fn fetch_csrf_token(
+    client: &Client,
+    request_base_url: &str,
+    host_header: Option<&str>,
+) -> Result<Option<String>> {
+    let response = apply_host_header(client.get(format!("{request_base_url}/")), host_header)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send()
+        .await
+        .context("failed to fetch 3x-ui login page")?;
+    if response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        if let Some(token) = csrf_token_from_html(&text) {
+            return Ok(Some(token));
+        }
+    }
+
+    let response = apply_host_header(
+        client.get(format!("{request_base_url}/csrf-token")),
+        host_header,
+    )
+    .header("X-Requested-With", "XMLHttpRequest")
+    .send()
+    .await
+    .context("failed to fetch 3x-ui CSRF token")?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let text = response.text().await.unwrap_or_default();
+    let envelope = parse_envelope::<String>(&text)?;
+    Ok(envelope.obj.filter(|token| !token.trim().is_empty()))
+}
+
+fn csrf_token_from_html(html: &str) -> Option<String> {
+    let marker = r#"name="csrf-token" content=""#;
+    let start = html.find(marker)? + marker.len();
+    let end = html[start..].find('"')?;
+    let token = html[start..start + end].trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
 }
 
 async fn read_credentials(app: &AppHandle, server: &ServerConfig) -> Result<PanelCredentials> {
@@ -1503,10 +1734,30 @@ fn normalize_panel_url(url: &str) -> Result<String> {
     if trimmed.is_empty() {
         bail!("panelUrl is empty");
     }
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        Ok(trimmed.to_string())
+    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
     } else {
-        Ok(format!("https://{trimmed}"))
+        format!("https://{trimmed}")
+    };
+
+    let mut parsed = Url::parse(&normalized).context("panelUrl is invalid")?;
+    let base_path = panel_base_path(parsed.path());
+    parsed.set_path(&base_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn panel_base_path(path: &str) -> String {
+    let Some(index) = path.find("/panel") else {
+        return path.trim_end_matches('/').to_string();
+    };
+
+    let base = path[..index].trim_end_matches('/');
+    if base.is_empty() {
+        String::new()
+    } else {
+        base.to_string()
     }
 }
 
@@ -1562,6 +1813,55 @@ fn is_tls_error(message: &str) -> bool {
         || lower.contains("invalid peer")
         || lower.contains("unknown issuer")
         || lower.contains("not valid for name")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn expand_local_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(dirs) = directories::BaseDirs::new() {
+            return dirs.home_dir().join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+fn validate_routing_filename(remote_filename: Option<&str>, local_path: &Path) -> Result<String> {
+    let filename = remote_filename
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            local_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .context("routing file name is empty")?;
+
+    if filename.len() > 128 {
+        bail!("routing file name is too long");
+    }
+
+    if filename.starts_with('.') || filename.contains('/') || filename.contains('\\') {
+        bail!("routing file name must be a plain file name");
+    }
+
+    if !filename
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+    {
+        bail!("routing file name may only contain letters, digits, dot, dash, and underscore");
+    }
+
+    if !filename.to_ascii_lowercase().ends_with(".dat") {
+        bail!("routing file must use a .dat extension");
+    }
+
+    Ok(filename)
 }
 
 fn session_cache_key(server: &ServerConfig) -> String {
@@ -1637,6 +1937,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn panel_base_path_strips_panel_routes() {
+        assert_eq!(
+            panel_base_path("/WgM5UTSqFEueUHYPxT/panel/xray"),
+            "/WgM5UTSqFEueUHYPxT"
+        );
+        assert_eq!(
+            panel_base_path("/WgM5UTSqFEueUHYPxT/panel/api/xray"),
+            "/WgM5UTSqFEueUHYPxT"
+        );
+        assert_eq!(panel_base_path("/panel/xray"), "");
+        assert_eq!(
+            panel_base_path("/WgM5UTSqFEueUHYPxT"),
+            "/WgM5UTSqFEueUHYPxT"
+        );
+    }
+
+    #[test]
     fn parses_xray_panel_wrapper_with_string_obj() {
         let response = json!(
             r#"{
@@ -1691,5 +2008,52 @@ mod tests {
             settings.config["outbounds"][0]["protocol"].as_str(),
             Some("socks")
         );
+    }
+
+    #[test]
+    fn pins_api_routing_rule_before_user_rules() {
+        let mut config = json!({
+            "routing": {
+                "rules": [
+                    { "type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "blocked" },
+                    { "type": "field", "inboundTag": ["api"], "outboundTag": "api" }
+                ]
+            }
+        });
+
+        ensure_api_routing_rule(&mut config);
+
+        assert_eq!(
+            config["routing"]["rules"][0]["outboundTag"].as_str(),
+            Some("api")
+        );
+        assert_eq!(
+            config["routing"]["rules"][1]["outboundTag"].as_str(),
+            Some("blocked")
+        );
+    }
+
+    #[test]
+    fn validates_custom_routing_dat_filename() {
+        let local_path = PathBuf::from("/tmp/geosite_custom.dat");
+
+        assert_eq!(
+            validate_routing_filename(None, &local_path).expect("filename should be valid"),
+            "geosite_custom.dat"
+        );
+        assert_eq!(
+            validate_routing_filename(Some("custom-list.dat"), &local_path)
+                .expect("remote filename should be valid"),
+            "custom-list.dat"
+        );
+        assert!(validate_routing_filename(Some("../bad.dat"), &local_path).is_err());
+        assert!(validate_routing_filename(Some("bad.txt"), &local_path).is_err());
+    }
+
+    #[test]
+    fn extracts_csrf_token_from_login_page() {
+        let html = r#"<meta name="csrf-token" content="abc123">"#;
+
+        assert_eq!(csrf_token_from_html(html).as_deref(), Some("abc123"));
     }
 }

@@ -1169,6 +1169,71 @@ code {
   backdrop-filter: blur(28px) saturate(1.2);
 }
 
+.xray-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.xray-tab {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0 12px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+}
+
+.xray-tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.xray-tab.active {
+  border-color: var(--border);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.xray-json-editor {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  padding: 14px;
+  resize: vertical;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.2);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  outline: none;
+}
+
+.xray-json-editor.full {
+  min-height: 560px;
+}
+
+.xray-json-error {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  color: #ff8c8c;
+  background: rgba(255, 75, 75, 0.08);
+  font-size: 12px;
+}
+
+.xray-advanced-grid {
+  display: grid;
+  gap: 14px;
+}
+
 .routing-section-header {
   display: flex;
   align-items: center;
@@ -1205,6 +1270,10 @@ code {
 
 .routing-inline-form.outbound-form {
   grid-template-columns: minmax(160px, 0.9fr) 150px minmax(190px, 1fr) 120px auto;
+}
+
+.routing-inline-form.routing-file-form {
+  grid-template-columns: minmax(260px, 1fr) minmax(180px, 0.45fr);
 }
 
 .routing-form-actions,

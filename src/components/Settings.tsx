@@ -49,6 +49,11 @@ const slug = (value: string) =>
     .replace(/^-|-$/g, "")
     .slice(0, 36);
 
+const normalizePanelBasePath = (value: string | null | undefined) => {
+  const trimmed = (value ?? "").trim().replace(/^\/+|\/+$/g, "");
+  return trimmed ? `/${trimmed}` : "";
+};
+
 export default function Settings({
   servers,
   pollIntervalSec,
@@ -191,7 +196,8 @@ export default function Settings({
 
   const panelInfoSaved = (info: PanelSetupInfo) => {
     const host = setupServer?.host ?? form.host;
-    const panelUrl = `http://${host}:${info.port}`;
+    const basePath = normalizePanelBasePath(info.webBasePath);
+    const panelUrl = `http://${host}:${info.port}${basePath}`;
     updateForm("panelUrl", panelUrl);
     updateForm("panelUser", info.username);
     if (setupServer) {

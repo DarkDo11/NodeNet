@@ -20,12 +20,12 @@ LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
 LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
 CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
 if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ] 2>/dev/null; then CPU_CORES=1; fi
-CPU=$(awk -v load="$LOAD1" -v cores="$CPU_CORES" '
+CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" '
   BEGIN {
-    if (cores <= 0 || load < 0) {
+    if (cores <= 0 || load_value < 0) {
       exit 1;
     }
-    printf "%.1f", (load / cores) * 100;
+    printf "%.1f", (load_value / cores) * 100;
   }')
 if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then
   CPU=

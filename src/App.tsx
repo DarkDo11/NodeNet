@@ -83,6 +83,7 @@ export default function App() {
     loadClients,
     loadXrayConfig,
     saveXrayConfig,
+    uploadRoutingFile,
     addClient,
     deleteClient,
     resetClientTraffic,
@@ -455,6 +456,7 @@ export default function App() {
               error={selectedServerId ? panelErrorByServer[selectedServerId] : undefined}
               isLoading={isLoadingXrayConfig}
               isSaving={isSavingXrayConfig}
+              isUploading={isRunningAction}
               onRefresh={() => {
                 if (selectedServerId) void loadXrayConfig(selectedServerId);
               }}
@@ -462,7 +464,18 @@ export default function App() {
                 if (!selectedServerId) return;
                 try {
                   await saveXrayConfig(selectedServerId, config);
-                  pushToast("info", "Xray routing saved");
+                  pushToast("info", "Xray routing saved and restarted");
+                } catch (error) {
+                  pushToast("error", error instanceof Error ? error.message : String(error));
+                  throw error;
+                }
+              }}
+              onUploadRoutingFile={async (localPath, remoteFilename) => {
+                if (!selectedServerId) return "";
+                try {
+                  const remotePath = await uploadRoutingFile(selectedServerId, localPath, remoteFilename);
+                  pushToast("info", "Routing file uploaded and Xray restarted");
+                  return remotePath;
                 } catch (error) {
                   pushToast("error", error instanceof Error ? error.message : String(error));
                   throw error;
