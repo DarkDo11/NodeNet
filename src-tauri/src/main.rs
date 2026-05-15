@@ -34,7 +34,7 @@ fn main() {
             tray::build_tray(app.handle())?;
             let tray_app_handle = app.handle().clone();
             app.listen("servers-changed", move |_| {
-                let _ = tray::rebuild_tray_for_app(&tray_app_handle);
+                let _ = tray::rebuild_tray_on_main_thread(&tray_app_handle);
             });
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

@@ -5,7 +5,16 @@ const TRAY_ID: &str = "nodenet-tray";
 
 #[tauri::command]
 pub fn rebuild_tray(app: AppHandle) -> Result<(), String> {
-    rebuild_tray_for_app(&app).map_err(|error| error.to_string())
+    rebuild_tray_on_main_thread(&app).map_err(|error| error.to_string())
+}
+
+pub fn rebuild_tray_on_main_thread(app: &AppHandle) -> tauri::Result<()> {
+    let app = app.clone();
+    app.clone().run_on_main_thread(move || {
+        if let Err(error) = rebuild_tray_for_app(&app) {
+            eprintln!("failed to rebuild tray: {error}");
+        }
+    })
 }
 
 pub fn rebuild_tray_for_app(app: &AppHandle) -> tauri::Result<()> {

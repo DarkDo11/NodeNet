@@ -671,14 +671,13 @@ pub async fn get_panel_setup_info(
 
     let output = ssh::execute_combined(app, server, "x-ui settings 2>&1 || true", 60).await?;
     let mut info = parse_panel_setup_info(&output, "cli");
-    if !info.password.is_empty() {
-        return Ok(info);
-    }
 
     let sqlite_username = read_xui_sqlite_setting(app, server, "webUsername")
         .await?
         .or(read_xui_sqlite_user(app, server).await?);
-    let sqlite_password = read_xui_sqlite_setting(app, server, "webPassword").await?;
+    let sqlite_password = read_xui_sqlite_setting(app, server, "webPassword")
+        .await?
+        .or(read_xui_sqlite_user_password(app, server).await?);
     let sqlite_port = read_xui_sqlite_setting(app, server, "webPort").await?;
     let sqlite_web_base_path = read_xui_sqlite_setting(app, server, "webBasePath").await?;
     let mut sqlite_found = false;
@@ -697,6 +696,9 @@ pub async fn get_panel_setup_info(
     if let Some(password) = sqlite_password {
         info.password = password;
         info.source = "sqlite".to_string();
+        return Ok(info);
+    }
+    if !info.password.is_empty() {
         return Ok(info);
     }
     if sqlite_found {
@@ -965,6 +967,18 @@ async fn read_xui_sqlite_user(
         app,
         server,
         "sqlite3 /etc/x-ui/x-ui.db \"SELECT username FROM users ORDER BY id LIMIT 1;\" 2>/dev/null || true",
+    )
+    .await
+}
+
+async fn read_xui_sqlite_user_password(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> anyhow::Result<Option<String>> {
+    read_xui_sqlite_value(
+        app,
+        server,
+        "sqlite3 /etc/x-ui/x-ui.db \"SELECT password FROM users ORDER BY id LIMIT 1;\" 2>/dev/null || true",
     )
     .await
 }

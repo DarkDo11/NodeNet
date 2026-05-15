@@ -329,7 +329,7 @@ export default function Settings({
       updateForm("panelUrl", panelUrl);
       updateForm("panelUser", info.username);
       await onSaveServer(updatedServer);
-      setMessage("3x-ui URL, login and password detected");
+      setMessage(info.password ? "3x-ui URL, login and password detected" : "3x-ui URL and login detected. Enter panel password manually.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
