@@ -11,6 +11,7 @@ import {
   Users,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import CountryFlag from "./CountryFlag";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
 export type AppView = "dashboard" | "inbounds" | "clients" | "routing" | "terminal" | "events" | "settings";
@@ -24,15 +25,6 @@ interface SidebarProps {
   onSelectServer: (serverId: string) => void;
   onChangeView: (view: AppView) => void;
 }
-
-const countryFlag = (country: string) => {
-  const code = country.trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(code)) return code || "--";
-
-  return String.fromCodePoint(
-    ...code.split("").map((letter) => 127397 + letter.charCodeAt(0)),
-  );
-};
 
 export default function Sidebar({
   servers,
@@ -141,7 +133,9 @@ export default function Sidebar({
               {selected ? (
                 <motion.span className="server-selection-glow" layoutId="server-selection" />
               ) : null}
-              <span className="server-flag">{countryFlag(server.country)}</span>
+              <span className="server-flag">
+                <CountryFlag country={server.country} />
+              </span>
               <span className="server-main">
                 <span className="server-name">{server.name}</span>
                 <span className="server-host">{server.sshUser}@{server.host}</span>

@@ -57,6 +57,8 @@ fn main() {
             commands::get_servers,
             commands::upsert_server,
             commands::delete_server,
+            commands::upsert_bastion,
+            commands::delete_bastion,
             commands::set_poll_interval,
             commands::set_theme,
             commands::get_metrics,

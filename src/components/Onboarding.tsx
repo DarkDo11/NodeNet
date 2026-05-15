@@ -2,10 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, KeyRound, Plus, ShieldCheck, Wifi } from "lucide-react";
 import { useState } from "react";
 import SetupPresets from "./SetupPresets";
-import type { ServerConfig, TestConnectionResult } from "../types";
+import type { BastionConfig, ServerConfig, TestConnectionResult } from "../types";
 
 interface OnboardingProps {
+  bastions: BastionConfig[];
   onCreateServer: (server: ServerConfig) => Promise<void>;
+  onSaveBastion?: (bastion: BastionConfig) => Promise<void>;
   onSetupStarted?: (serverId: string) => void;
   onFinishSetup?: () => void;
 }
@@ -19,7 +21,15 @@ const makeId = (name: string, host: string) => {
   return base || crypto.randomUUID();
 };
 
-export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSetup }: OnboardingProps) {
+const makeBastionId = (name: string, host: string) => makeId(name || "bastion", host);
+
+export default function Onboarding({
+  bastions,
+  onCreateServer,
+  onSaveBastion,
+  onSetupStarted,
+  onFinishSetup,
+}: OnboardingProps) {
   const [name, setName] = useState("Germany 1");
   const [host, setHost] = useState("");
   const [sshPort, setSshPort] = useState(22);
@@ -37,6 +47,9 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
   const [bastionUser, setBastionUser] = useState("root");
   const [bastionPassword, setBastionPassword] = useState("");
   const [bastionSshKeyPath, setBastionSshKeyPath] = useState("");
+  const [selectedBastionId, setSelectedBastionId] = useState("");
+  const [bastionPresetName, setBastionPresetName] = useState("");
+  const [saveBastionPreset, setSaveBastionPreset] = useState(false);
   const [panelPassword, setPanelPassword] = useState("");
   const [error, setError] = useState("");
   const [testMessage, setTestMessage] = useState("");
@@ -61,6 +74,31 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
     sshKeyPassphrase: null,
     sslVerify,
   });
+
+  const buildBastion = (): BastionConfig => ({
+    id: selectedBastionId || makeBastionId(bastionPresetName || bastionHost, bastionHost),
+    name: bastionPresetName.trim() || bastionHost.trim(),
+    host: bastionHost.trim(),
+    port: bastionPort || 22,
+    user: bastionUser.trim() || sshUser.trim() || "root",
+    sshKeyPath: bastionSshKeyPath.trim() || null,
+  });
+
+  const applyBastion = (bastionId: string) => {
+    setSelectedBastionId(bastionId);
+    const bastion = bastions.find((item) => item.id === bastionId);
+    if (!bastion) {
+      setBastionPresetName("");
+      return;
+    }
+
+    setUseBastion(true);
+    setBastionPresetName(bastion.name);
+    setBastionHost(bastion.host);
+    setBastionPort(bastion.port);
+    setBastionUser(bastion.user);
+    setBastionSshKeyPath(bastion.sshKeyPath ?? "");
+  };
 
   const submit = async () => {
     if (!name.trim() || !host.trim() || !sshUser.trim()) {
@@ -90,6 +128,14 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
           username: server.panelUser || "admin",
           password: panelPassword,
         });
+      }
+      if (useBastion && saveBastionPreset && onSaveBastion) {
+        const bastion = buildBastion();
+        if (bastion.name && bastion.host) {
+          await onSaveBastion(bastion);
+          setSelectedBastionId(bastion.id);
+          setBastionPresetName(bastion.name);
+        }
       }
       setCreatedServer(server);
     } catch (err) {
@@ -173,11 +219,11 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
         <div className="settings-form-grid">
           <label className="field">
             <span>Name</span>
-            <input value={name} onChange={(event) => setName(event.target.value)} />
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Germany 1" />
           </label>
           <label className="field">
             <span>Country</span>
-            <input value={country} onChange={(event) => setCountry(event.target.value)} maxLength={2} />
+            <input value={country} onChange={(event) => setCountry(event.target.value)} maxLength={2} placeholder="DE" />
           </label>
           <label className="field wide">
             <span>Host</span>
@@ -185,15 +231,15 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
           </label>
           <label className="field">
             <span>SSH user</span>
-            <input value={sshUser} onChange={(event) => setSshUser(event.target.value)} />
+            <input value={sshUser} onChange={(event) => setSshUser(event.target.value)} placeholder="root" />
           </label>
           <label className="field">
             <span>SSH port</span>
-            <input type="number" min={1} max={65535} value={sshPort} onChange={(event) => setSshPort(Number(event.target.value))} />
+            <input type="number" min={1} max={65535} value={sshPort} onChange={(event) => setSshPort(Number(event.target.value))} placeholder="22" />
           </label>
           <label className="field wide">
             <span>SSH password</span>
-            <input type="password" value={sshPassword} onChange={(event) => setSshPassword(event.target.value)} />
+            <input type="password" value={sshPassword} onChange={(event) => setSshPassword(event.target.value)} placeholder="Keychain secret" />
           </label>
           <label className="field wide">
             <span>SSH key path</span>
@@ -209,11 +255,11 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
           </label>
           <label className="field">
             <span>Panel user</span>
-            <input value={panelUser} onChange={(event) => setPanelUser(event.target.value)} />
+            <input value={panelUser} onChange={(event) => setPanelUser(event.target.value)} placeholder="admin" />
           </label>
           <label className="field">
             <span>Panel password</span>
-            <input type="password" value={panelPassword} onChange={(event) => setPanelPassword(event.target.value)} />
+            <input type="password" value={panelPassword} onChange={(event) => setPanelPassword(event.target.value)} placeholder="3x-ui secret" />
           </label>
           <label className="field checkbox-field">
             <span>Verify SSL</span>
@@ -229,6 +275,21 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
               <input type="checkbox" checked={useBastion} onChange={(event) => setUseBastion(event.target.checked)} />
             </label>
             <label className="field">
+              <span>Saved bastion</span>
+              <select value={selectedBastionId} onChange={(event) => applyBastion(event.target.value)}>
+                <option value="">Custom bastion</option>
+                {bastions.map((bastion) => (
+                  <option key={bastion.id} value={bastion.id}>
+                    {bastion.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Preset name</span>
+              <input value={bastionPresetName} onChange={(event) => setBastionPresetName(event.target.value)} placeholder="Main bastion" />
+            </label>
+            <label className="field">
               <span>Host</span>
               <input value={bastionHost} onChange={(event) => setBastionHost(event.target.value)} placeholder="bastion.example.com" />
             </label>
@@ -238,15 +299,19 @@ export default function Onboarding({ onCreateServer, onSetupStarted, onFinishSet
             </label>
             <label className="field">
               <span>User</span>
-              <input value={bastionUser} onChange={(event) => setBastionUser(event.target.value)} />
+              <input value={bastionUser} onChange={(event) => setBastionUser(event.target.value)} placeholder="root" />
             </label>
             <label className="field wide">
               <span>Bastion password / key passphrase</span>
-              <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} />
+              <input type="password" value={bastionPassword} onChange={(event) => setBastionPassword(event.target.value)} placeholder="Keychain secret" />
             </label>
             <label className="field wide">
               <span>Bastion SSH key path</span>
               <input value={bastionSshKeyPath} onChange={(event) => setBastionSshKeyPath(event.target.value)} placeholder="~/.ssh/bastion_ed25519" />
+            </label>
+            <label className="field checkbox-field">
+              <span>Save bastion</span>
+              <input type="checkbox" checked={saveBastionPreset} onChange={(event) => setSaveBastionPreset(event.target.checked)} />
             </label>
           </div>
         </details>

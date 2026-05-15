@@ -1,9 +1,11 @@
 use crate::{
     alerts,
     config::{
-        config_path, delete_server as delete_server_config, find_server, load_config, save_config,
+        config_path, delete_bastion as delete_bastion_config,
+        delete_server as delete_server_config, find_server, load_config, save_config,
         set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
-        upsert_server as upsert_server_config, AppConfig, ServerConfig,
+        upsert_bastion as upsert_bastion_config, upsert_server as upsert_server_config, AppConfig,
+        BastionConfig, ServerConfig,
     },
     metrics::{collect, ServerMetrics},
     ssh::{
@@ -78,6 +80,20 @@ pub fn save_app_config(config: AppConfig) -> Result<AppConfig, String> {
 #[tauri::command]
 pub fn upsert_server(app: AppHandle, server: ServerConfig) -> Result<AppConfig, String> {
     let config = upsert_server_config(server).map_err(|error| error.to_string())?;
+    let _ = app.emit("servers-changed", ());
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn upsert_bastion(app: AppHandle, bastion: BastionConfig) -> Result<AppConfig, String> {
+    let config = upsert_bastion_config(bastion).map_err(|error| error.to_string())?;
+    let _ = app.emit("servers-changed", ());
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn delete_bastion(app: AppHandle, bastion_id: String) -> Result<AppConfig, String> {
+    let config = delete_bastion_config(&bastion_id).map_err(|error| error.to_string())?;
     let _ = app.emit("servers-changed", ());
     Ok(config)
 }

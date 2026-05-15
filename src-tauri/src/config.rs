@@ -31,11 +31,25 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BastionConfig {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
     pub poll_interval_sec: u64,
     pub servers: Vec<ServerConfig>,
+    #[serde(default)]
+    pub bastions: Vec<BastionConfig>,
 }
 
 impl Default for AppConfig {
@@ -44,6 +58,7 @@ impl Default for AppConfig {
             theme: default_theme(),
             poll_interval_sec: 10,
             servers: Vec::new(),
+            bastions: Vec::new(),
         }
     }
 }
@@ -128,6 +143,33 @@ pub fn upsert_server(mut server: ServerConfig) -> Result<AppConfig> {
 pub fn delete_server(server_id: &str) -> Result<AppConfig> {
     let mut config = load_config()?;
     config.servers.retain(|server| server.id != server_id);
+    save_config(&config)?;
+    Ok(config)
+}
+
+pub fn upsert_bastion(mut bastion: BastionConfig) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    if bastion.id.trim().is_empty() {
+        bastion.id = uuid::Uuid::new_v4().simple().to_string();
+    }
+
+    if let Some(existing) = config
+        .bastions
+        .iter_mut()
+        .find(|existing| existing.id == bastion.id)
+    {
+        *existing = bastion;
+    } else {
+        config.bastions.push(bastion);
+    }
+
+    save_config(&config)?;
+    Ok(config)
+}
+
+pub fn delete_bastion(bastion_id: &str) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    config.bastions.retain(|bastion| bastion.id != bastion_id);
     save_config(&config)?;
     Ok(config)
 }

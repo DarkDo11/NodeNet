@@ -18,12 +18,22 @@ export interface ServerConfig {
   sslVerify: boolean;
 }
 
+export interface BastionConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  sshKeyPath?: string | null;
+}
+
 export type AppTheme = "dark" | "contrast" | "system";
 
 export interface AppConfig {
   theme: AppTheme;
   pollIntervalSec: number;
   servers: ServerConfig[];
+  bastions: BastionConfig[];
 }
 
 export interface PingResult {

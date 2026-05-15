@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { AppConfig, AppTheme, PingResult, ServerConfig } from "../types";
+import type { AppConfig, AppTheme, BastionConfig, PingResult, ServerConfig } from "../types";
 
 interface ServerState {
   servers: ServerConfig[];
+  bastions: BastionConfig[];
   selectedServerId: string | null;
   statusById: Record<string, PingResult>;
   configPollIntervalSec: number;
@@ -14,6 +15,8 @@ interface ServerState {
   selectServer: (serverId: string) => void;
   upsertServer: (server: ServerConfig) => Promise<void>;
   deleteServer: (serverId: string) => Promise<void>;
+  upsertBastion: (bastion: BastionConfig) => Promise<void>;
+  deleteBastion: (bastionId: string) => Promise<void>;
   savePollInterval: (seconds: number) => Promise<void>;
   saveTheme: (theme: AppTheme) => Promise<void>;
   pingServer: (serverId: string) => Promise<void>;
@@ -25,6 +28,7 @@ const applyConfig = (
   currentSelected: string | null,
 ) => ({
   servers: config.servers,
+  bastions: config.bastions ?? [],
   configPollIntervalSec: config.pollIntervalSec,
   theme: config.theme,
   selectedServerId:
@@ -35,6 +39,7 @@ const applyConfig = (
 
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
+  bastions: [],
   selectedServerId: null,
   statusById: {},
   configPollIntervalSec: 10,
@@ -69,6 +74,16 @@ export const useServerStore = create<ServerState>((set, get) => ({
       config,
       get().selectedServerId === serverId ? config.servers[0]?.id ?? null : get().selectedServerId,
     ));
+  },
+
+  upsertBastion: async (bastion) => {
+    const config = await invoke<AppConfig>("upsert_bastion", { bastion });
+    set(applyConfig(config, get().selectedServerId));
+  },
+
+  deleteBastion: async (bastionId) => {
+    const config = await invoke<AppConfig>("delete_bastion", { bastionId });
+    set(applyConfig(config, get().selectedServerId));
   },
 
   savePollInterval: async (seconds) => {

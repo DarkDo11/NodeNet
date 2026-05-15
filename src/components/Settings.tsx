@@ -11,17 +11,21 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import ConfirmModal from "./ConfirmModal";
+import CountryFlag from "./CountryFlag";
 import SetupPresets from "./SetupPresets";
-import type { AppTheme, PanelSetupInfo, ServerConfig, TestConnectionResult } from "../types";
+import type { AppTheme, BastionConfig, PanelSetupInfo, ServerConfig, TestConnectionResult } from "../types";
 
 interface SettingsProps {
   servers: ServerConfig[];
+  bastions: BastionConfig[];
   pollIntervalSec: number;
   theme: AppTheme;
   onPollIntervalChange: (seconds: number) => Promise<void>;
   onThemeChange: (theme: AppTheme) => Promise<void>;
   onSaveServer: (server: ServerConfig) => Promise<void>;
   onDeleteServer: (serverId: string) => Promise<void>;
+  onSaveBastion: (bastion: BastionConfig) => Promise<void>;
+  onDeleteBastion: (bastionId: string) => Promise<void>;
 }
 
 const emptyServer = (): ServerConfig => ({
@@ -49,6 +53,20 @@ const slug = (value: string) =>
     .replace(/^-|-$/g, "")
     .slice(0, 36);
 
+const bastionFromServer = (server: ServerConfig): BastionConfig | null => {
+  const host = server.bastionHost?.trim();
+  if (!host) return null;
+
+  return {
+    id: "",
+    name: host,
+    host,
+    port: server.bastionPort || 22,
+    user: server.bastionUser?.trim() || server.sshUser.trim() || "root",
+    sshKeyPath: server.bastionSshKeyPath?.trim() || null,
+  };
+};
+
 const normalizePanelBasePath = (value: string | null | undefined) => {
   const trimmed = (value ?? "").trim().replace(/^\/+|\/+$/g, "");
   return trimmed ? `/${trimmed}` : "";
@@ -56,12 +74,15 @@ const normalizePanelBasePath = (value: string | null | undefined) => {
 
 export default function Settings({
   servers,
+  bastions,
   pollIntervalSec,
   theme,
   onPollIntervalChange,
   onThemeChange,
   onSaveServer,
   onDeleteServer,
+  onSaveBastion,
+  onDeleteBastion,
 }: SettingsProps) {
   const [selectedServerId, setSelectedServerId] = useState<string>("");
   const [isCreatingServer, setIsCreatingServer] = useState(false);
@@ -69,6 +90,8 @@ export default function Settings({
   const [password, setPassword] = useState("");
   const [keyPassphrase, setKeyPassphrase] = useState("");
   const [bastionPassword, setBastionPassword] = useState("");
+  const [selectedBastionId, setSelectedBastionId] = useState("");
+  const [bastionPresetName, setBastionPresetName] = useState("");
   const [panelPassword, setPanelPassword] = useState("");
   const [setupServerId, setSetupServerId] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState("");
@@ -94,11 +117,23 @@ export default function Settings({
 
   useEffect(() => {
     setForm(selectedServer ? { ...emptyServer(), ...selectedServer } : emptyServer());
+    const selectedBastion = selectedServer ? bastionFromServer(selectedServer) : null;
+    const matchingBastion = selectedBastion
+      ? bastions.find(
+          (bastion) =>
+            bastion.host === selectedBastion.host &&
+            bastion.port === selectedBastion.port &&
+            bastion.user === selectedBastion.user &&
+            (bastion.sshKeyPath ?? "") === (selectedBastion.sshKeyPath ?? ""),
+        )
+      : null;
+    setSelectedBastionId(matchingBastion?.id ?? "");
+    setBastionPresetName(matchingBastion?.name ?? selectedBastion?.name ?? "");
     setPassword("");
     setKeyPassphrase("");
     setBastionPassword("");
     setPanelPassword("");
-  }, [selectedServer]);
+  }, [bastions, selectedServer]);
 
   useEffect(() => {
     void invoke<string>("get_config_path")
@@ -129,6 +164,63 @@ export default function Settings({
       sshKeyPassphrase: null,
       sslVerify: form.sslVerify,
     };
+  };
+
+  const normalizedBastion = (): BastionConfig => ({
+    id: selectedBastionId || slug(`${bastionPresetName || form.bastionHost}-${form.bastionHost}`) || crypto.randomUUID(),
+    name: bastionPresetName.trim() || form.bastionHost?.trim() || "Bastion",
+    host: form.bastionHost?.trim() || "",
+    port: form.bastionPort || 22,
+    user: form.bastionUser?.trim() || form.sshUser.trim() || "root",
+    sshKeyPath: form.bastionSshKeyPath?.trim() || null,
+  });
+
+  const applyBastion = (bastionId: string) => {
+    setSelectedBastionId(bastionId);
+    const bastion = bastions.find((item) => item.id === bastionId);
+    if (!bastion) {
+      setBastionPresetName("");
+      return;
+    }
+
+    setBastionPresetName(bastion.name);
+    updateForm("bastionHost", bastion.host);
+    updateForm("bastionPort", bastion.port);
+    updateForm("bastionUser", bastion.user);
+    updateForm("bastionSshKeyPath", bastion.sshKeyPath ?? "");
+  };
+
+  const saveBastion = async () => {
+    setError("");
+    const bastion = normalizedBastion();
+
+    if (!bastion.name || !bastion.host || !bastion.user) {
+      setError("Bastion name, host and user are required.");
+      return;
+    }
+
+    try {
+      await onSaveBastion(bastion);
+      setSelectedBastionId(bastion.id);
+      setBastionPresetName(bastion.name);
+      setMessage("Bastion saved");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const removeBastion = async () => {
+    if (!selectedBastionId) return;
+
+    setError("");
+    try {
+      await onDeleteBastion(selectedBastionId);
+      setSelectedBastionId("");
+      setBastionPresetName("");
+      setMessage("Bastion deleted");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const saveServer = async () => {
@@ -292,6 +384,8 @@ export default function Settings({
             setIsCreatingServer(true);
             setSelectedServerId("");
             setForm(emptyServer());
+            setSelectedBastionId("");
+            setBastionPresetName("");
             setPassword("");
             setKeyPassphrase("");
             setBastionPassword("");
@@ -365,23 +459,23 @@ export default function Settings({
             </label>
             <label className="field">
               <span>Name</span>
-              <input value={form.name} onChange={(event) => updateForm("name", event.target.value)} />
+              <input value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Germany 1" />
             </label>
             <label className="field">
               <span>Country</span>
-              <input maxLength={2} value={form.country} onChange={(event) => updateForm("country", event.target.value)} />
+              <input maxLength={2} value={form.country} onChange={(event) => updateForm("country", event.target.value)} placeholder="DE" />
             </label>
             <label className="field">
               <span>Host</span>
-              <input value={form.host} onChange={(event) => updateForm("host", event.target.value)} />
+              <input value={form.host} onChange={(event) => updateForm("host", event.target.value)} placeholder="1.2.3.4" />
             </label>
             <label className="field">
               <span>SSH port</span>
-              <input type="number" min={1} max={65535} value={form.sshPort} onChange={(event) => updateForm("sshPort", Number(event.target.value))} />
+              <input type="number" min={1} max={65535} value={form.sshPort} onChange={(event) => updateForm("sshPort", Number(event.target.value))} placeholder="22" />
             </label>
             <label className="field">
               <span>SSH user</span>
-              <input value={form.sshUser} onChange={(event) => updateForm("sshUser", event.target.value)} />
+              <input value={form.sshUser} onChange={(event) => updateForm("sshUser", event.target.value)} placeholder="root" />
             </label>
             <label className="field wide">
               <span>SSH key path</span>
@@ -393,11 +487,11 @@ export default function Settings({
             </label>
             <label className="field wide">
               <span>3x-ui panel URL</span>
-              <input value={form.panelUrl ?? ""} onChange={(event) => updateForm("panelUrl", event.target.value)} />
+              <input value={form.panelUrl ?? ""} onChange={(event) => updateForm("panelUrl", event.target.value)} placeholder="https://panel.example.com" />
             </label>
             <label className="field">
               <span>3x-ui user</span>
-              <input value={form.panelUser ?? ""} onChange={(event) => updateForm("panelUser", event.target.value)} />
+              <input value={form.panelUser ?? ""} onChange={(event) => updateForm("panelUser", event.target.value)} placeholder="admin" />
             </label>
           </div>
 
@@ -418,16 +512,31 @@ export default function Settings({
                 />
               </label>
               <label className="field">
+                <span>Saved bastion</span>
+                <select value={selectedBastionId} onChange={(event) => applyBastion(event.target.value)}>
+                  <option value="">Custom bastion</option>
+                  {bastions.map((bastion) => (
+                    <option key={bastion.id} value={bastion.id}>
+                      {bastion.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Preset name</span>
+                <input value={bastionPresetName} onChange={(event) => setBastionPresetName(event.target.value)} placeholder="Main bastion" />
+              </label>
+              <label className="field">
                 <span>Host</span>
-                <input value={form.bastionHost ?? ""} onChange={(event) => updateForm("bastionHost", event.target.value)} />
+                <input value={form.bastionHost ?? ""} onChange={(event) => updateForm("bastionHost", event.target.value)} placeholder="bastion.example.com" />
               </label>
               <label className="field">
                 <span>Port</span>
-                <input type="number" min={1} max={65535} value={form.bastionPort ?? 22} onChange={(event) => updateForm("bastionPort", Number(event.target.value))} />
+                <input type="number" min={1} max={65535} value={form.bastionPort ?? 22} onChange={(event) => updateForm("bastionPort", Number(event.target.value))} placeholder="22" />
               </label>
               <label className="field">
                 <span>User</span>
-                <input value={form.bastionUser ?? ""} onChange={(event) => updateForm("bastionUser", event.target.value)} />
+                <input value={form.bastionUser ?? ""} onChange={(event) => updateForm("bastionUser", event.target.value)} placeholder="root" />
               </label>
               <label className="field">
                 <span>Password / key passphrase</span>
@@ -445,6 +554,14 @@ export default function Settings({
                 <button className="command-button danger" disabled={!selectedServer} onClick={() => void deleteBastionPassword()}>
                   <Trash2 size={16} />
                   <span>Delete</span>
+                </button>
+                <button className="command-button" disabled={!form.bastionHost?.trim()} onClick={() => void saveBastion()}>
+                  <Save size={16} />
+                  <span>Save bastion</span>
+                </button>
+                <button className="command-button danger" disabled={!selectedBastionId} onClick={() => void removeBastion()}>
+                  <Trash2 size={16} />
+                  <span>Delete bastion</span>
                 </button>
               </div>
             </div>
@@ -577,7 +694,9 @@ export default function Settings({
                 }}
               >
                 <strong>{server.name}</strong>
-                <span>{server.country}</span>
+                <span className="country-cell">
+                  <CountryFlag country={server.country} />
+                </span>
                 <code>{server.sshUser}@{server.host}:{server.sshPort}</code>
                 <code>{server.panelUrl ?? "--"}</code>
                 <span>{server.sshKeyPath ? ".pem" : "password"}</span>

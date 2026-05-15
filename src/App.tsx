@@ -36,6 +36,7 @@ export default function App() {
   const [onboardingSetupServerId, setOnboardingSetupServerId] = useState<string | null>(null);
   const {
     servers,
+    bastions,
     selectedServerId,
     statusById,
     configPollIntervalSec,
@@ -45,6 +46,8 @@ export default function App() {
     selectServer,
     upsertServer,
     deleteServer,
+    upsertBastion,
+    deleteBastion,
     savePollInterval,
     saveTheme,
     pingAllServers,
@@ -338,7 +341,9 @@ export default function App() {
         <div className="view-slot">
           {showOnboarding ? (
             <Onboarding
+              bastions={bastions}
               onCreateServer={saveServer}
+              onSaveBastion={upsertBastion}
               onSetupStarted={setOnboardingSetupServerId}
               onFinishSetup={() => {
                 setOnboardingSetupServerId(null);
@@ -496,12 +501,15 @@ export default function App() {
           {!showOnboarding && activeView === "settings" ? (
             <Settings
               servers={servers}
+              bastions={bastions}
               pollIntervalSec={pollIntervalSec}
               theme={theme}
               onPollIntervalChange={updatePollInterval}
               onThemeChange={updateTheme}
               onSaveServer={saveServer}
               onDeleteServer={deleteServer}
+              onSaveBastion={upsertBastion}
+              onDeleteBastion={deleteBastion}
             />
           ) : null}
         </div>
