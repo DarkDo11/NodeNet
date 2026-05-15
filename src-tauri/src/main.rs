@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod keychain;
 mod metrics;
+mod monitor;
 mod secrets;
 mod ssh;
 mod terminal;
@@ -61,6 +62,9 @@ fn main() {
             commands::delete_bastion,
             commands::set_poll_interval,
             commands::set_theme,
+            commands::set_monitor_server,
+            commands::install_monitor_agent,
+            commands::sync_monitor_ssh_key,
             commands::get_metrics,
             commands::ping_server,
             commands::save_ssh_password,

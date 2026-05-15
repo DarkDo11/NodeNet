@@ -34,6 +34,7 @@ export interface AppConfig {
   pollIntervalSec: number;
   servers: ServerConfig[];
   bastions: BastionConfig[];
+  monitorServerId?: string | null;
 }
 
 export interface PingResult {

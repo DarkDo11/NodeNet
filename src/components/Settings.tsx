@@ -4,6 +4,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  ServerCog,
   ShieldCheck,
   SlidersHorizontal,
   Wifi,
@@ -18,10 +19,12 @@ import type { AppTheme, BastionConfig, PanelSetupInfo, ServerConfig, TestConnect
 interface SettingsProps {
   servers: ServerConfig[];
   bastions: BastionConfig[];
+  monitorServerId: string | null;
   pollIntervalSec: number;
   theme: AppTheme;
   onPollIntervalChange: (seconds: number) => Promise<void>;
   onThemeChange: (theme: AppTheme) => Promise<void>;
+  onMonitorServerChange: (serverId: string | null) => Promise<void>;
   onSaveServer: (server: ServerConfig) => Promise<void>;
   onDeleteServer: (serverId: string) => Promise<void>;
   onSaveBastion: (bastion: BastionConfig) => Promise<void>;
@@ -75,10 +78,12 @@ const normalizePanelBasePath = (value: string | null | undefined) => {
 export default function Settings({
   servers,
   bastions,
+  monitorServerId,
   pollIntervalSec,
   theme,
   onPollIntervalChange,
   onThemeChange,
+  onMonitorServerChange,
   onSaveServer,
   onDeleteServer,
   onSaveBastion,
@@ -92,12 +97,14 @@ export default function Settings({
   const [bastionPassword, setBastionPassword] = useState("");
   const [selectedBastionId, setSelectedBastionId] = useState("");
   const [bastionPresetName, setBastionPresetName] = useState("");
+  const [syncMonitorKey, setSyncMonitorKey] = useState(true);
   const [panelPassword, setPanelPassword] = useState("");
   const [setupServerId, setSetupServerId] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
+  const [installingMonitor, setInstallingMonitor] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const selectedServer = useMemo(
@@ -129,6 +136,7 @@ export default function Settings({
       : null;
     setSelectedBastionId(matchingBastion?.id ?? "");
     setBastionPresetName(matchingBastion?.name ?? selectedBastion?.name ?? "");
+    setSyncMonitorKey(!selectedServer);
     setPassword("");
     setKeyPassphrase("");
     setBastionPassword("");
@@ -223,6 +231,20 @@ export default function Settings({
     }
   };
 
+  const installMonitorAgent = async () => {
+    setInstallingMonitor(true);
+    setError("");
+    setMessage("");
+    try {
+      await invoke<string>("install_monitor_agent");
+      setMessage("Monitor agent installed and started");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInstallingMonitor(false);
+    }
+  };
+
   const saveServer = async () => {
     setError("");
     const server = normalizedServer();
@@ -240,6 +262,14 @@ export default function Settings({
       setMessage("Server saved");
       if (wasNew) {
         setSetupServerId(server.id);
+      }
+      if (wasNew && monitorServerId && syncMonitorKey && server.sshKeyPath) {
+        try {
+          await invoke<string>("sync_monitor_ssh_key", { serverId: server.id });
+          setMessage("Server saved and SSH key synced to monitor");
+        } catch (err) {
+          setError(`Server saved, but monitor key sync failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -386,6 +416,7 @@ export default function Settings({
             setForm(emptyServer());
             setSelectedBastionId("");
             setBastionPresetName("");
+            setSyncMonitorKey(true);
             setPassword("");
             setKeyPassphrase("");
             setBastionPassword("");
@@ -427,6 +458,30 @@ export default function Settings({
               <option value="system">System</option>
             </select>
           </label>
+          <label className="field">
+            <span>Monitor server</span>
+            <select
+              value={monitorServerId ?? ""}
+              onChange={(event) => void onMonitorServerChange(event.target.value || null)}
+            >
+              <option value="">This app</option>
+              {servers.map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="settings-actions">
+            <button
+              className="command-button"
+              disabled={!monitorServerId || installingMonitor}
+              onClick={() => void installMonitorAgent()}
+            >
+              <ServerCog size={16} className={installingMonitor ? "spin" : ""} />
+              <span>{installingMonitor ? "Installing" : "Install monitor"}</span>
+            </button>
+          </div>
         </article>
 
         <article className="settings-panel wide">
@@ -480,6 +535,15 @@ export default function Settings({
             <label className="field wide">
               <span>SSH key path</span>
               <input value={form.sshKeyPath ?? ""} onChange={(event) => updateForm("sshKeyPath", event.target.value)} placeholder="~/.ssh/server.pem" />
+            </label>
+            <label className="field checkbox-field">
+              <span>Sync key to monitor</span>
+              <input
+                type="checkbox"
+                checked={syncMonitorKey}
+                disabled={!isCreatingServer || !monitorServerId || !form.sshKeyPath?.trim()}
+                onChange={(event) => setSyncMonitorKey(event.target.checked)}
+              />
             </label>
             <label className="field checkbox-field">
               <span>Verify SSL</span>

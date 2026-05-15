@@ -1,7 +1,7 @@
 use crate::{config::ServerConfig, ssh};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::AppHandle;
 
@@ -64,9 +64,16 @@ printf 'rx_bytes=%s\n' "$RX_BYTES"
 printf 'tx_bytes=%s\n' "$TX_BYTES"
 printf 'total_rx_bytes=%s\n' "$RX_BYTES"
 printf 'total_tx_bytes=%s\n' "$TX_BYTES"
+GOOGLE_204_MS=
+if command -v curl >/dev/null 2>&1; then
+  GOOGLE_204_MS=$(curl -o /dev/null -s -w '%{time_total}' --max-time 8 https://www.google.com/generate_204 2>/dev/null | awk '{ if ($1 ~ /^[0-9]+([.][0-9]+)?$/) printf "%.1f", $1 * 1000 }')
+elif command -v wget >/dev/null 2>&1; then
+  GOOGLE_204_MS=$({ start=$(date +%s%3N 2>/dev/null || date +%s000); wget -q -T 8 -O /dev/null https://www.google.com/generate_204 >/dev/null 2>&1 && end=$(date +%s%3N 2>/dev/null || date +%s000) && awk -v start="$start" -v end="$end" 'BEGIN { printf "%.1f", end - start }'; } || true)
+fi
+printf 'google_204_ms=%s\n' "$GOOGLE_204_MS"
 "#;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerMetrics {
     pub server_id: String,
@@ -97,7 +104,9 @@ pub async fn collect(app: &AppHandle, server: &ServerConfig) -> Result<ServerMet
         ssh::ping_ms(app, server)
     );
     let mut metrics = parse_metrics(&server.id, &output?)?;
-    metrics.ping_ms = ping_ms;
+    if metrics.ping_ms.is_none() {
+        metrics.ping_ms = ping_ms;
+    }
     metrics.is_online = true;
     Ok(metrics)
 }
@@ -169,7 +178,11 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         total_rx_bytes,
         total_tx_bytes,
         total_traffic_bytes: total_rx_bytes.saturating_add(total_tx_bytes),
-        ping_ms: None,
+        ping_ms: values
+            .get("google_204_ms")
+            .and_then(|value| parse_decimal(value).ok())
+            .filter(|value| *value >= 0.0)
+            .map(round_one),
         is_online: true,
     })
 }

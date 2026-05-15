@@ -3,11 +3,13 @@ use crate::{
     config::{
         config_path, delete_bastion as delete_bastion_config,
         delete_server as delete_server_config, find_server, load_config, save_config,
+        set_monitor_server as set_monitor_server_config,
         set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
         upsert_bastion as upsert_bastion_config, upsert_server as upsert_server_config, AppConfig,
         BastionConfig, ServerConfig,
     },
     metrics::{collect, ServerMetrics},
+    monitor,
     ssh::{
         self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
         delete_password, ping, read_saved_key_passphrase,
@@ -149,7 +151,33 @@ pub fn set_theme(theme: String) -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
+pub fn set_monitor_server(server_id: Option<String>) -> Result<AppConfig, String> {
+    set_monitor_server_config(server_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn install_monitor_agent(app: AppHandle) -> Result<String, String> {
+    monitor::install_agent(&app)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_monitor_ssh_key(app: AppHandle, server_id: String) -> Result<String, String> {
+    monitor::sync_server_ssh_key(&app, &server_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetrics, String> {
+    if let Some(metrics) = monitor::latest_metrics(&app, &server_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(metrics);
+    }
+
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
     collect(&app, &server)
         .await
@@ -159,6 +187,13 @@ pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetr
 #[tauri::command]
 pub async fn ping_server(app: AppHandle, server_id: String) -> Result<PingResult, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    if let Some(result) = monitor::ping_from_monitor(&app, &server)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(result);
+    }
+
     Ok(ping(&app, &server).await)
 }
 
@@ -817,7 +852,14 @@ fn public_key_path_for_private(private_key_path: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn load_metrics_cache() -> Result<Value, String> {
+pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
+    if let Some(cache) = monitor::load_metrics_cache(&app)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(cache);
+    }
+
     let path = crate::config::config_dir()
         .map_err(|error| error.to_string())?
         .join("metrics-cache.json");
@@ -830,6 +872,13 @@ pub fn load_metrics_cache() -> Result<Value, String> {
 
 #[tauri::command]
 pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
+    if crate::config::load_config()
+        .map(|config| monitor::is_enabled(&config))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
     let directory = crate::config::config_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join("metrics-cache.json");

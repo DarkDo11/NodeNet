@@ -1,4 +1,4 @@
-use crate::{config::load_config, keychain, metrics, ssh, three_x_ui};
+use crate::{config::load_config, keychain, metrics, monitor, ssh, three_x_ui};
 use aes_gcm::{
     aead::{rand_core::RngCore, Aead, OsRng},
     Aes256Gcm, KeyInit, Nonce,
@@ -61,7 +61,17 @@ struct EncryptedEventsFile {
 }
 
 #[tauri::command]
-pub async fn get_events(state: State<'_, AlertsState>) -> Result<Vec<AlertEvent>, String> {
+pub async fn get_events(
+    app: AppHandle,
+    state: State<'_, AlertsState>,
+) -> Result<Vec<AlertEvent>, String> {
+    if let Some(events) = monitor::load_events(&app)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(events);
+    }
+
     Ok(state.events.lock().await.iter().cloned().collect())
 }
 
@@ -97,6 +107,10 @@ pub fn start_alert_poller(app: AppHandle) {
 
 async fn poll_once(app: &AppHandle) -> Result<()> {
     let config = load_config()?;
+    if monitor::is_enabled(&config) {
+        return Ok(());
+    }
+
     let mut handles = Vec::with_capacity(config.servers.len());
 
     for server in config.servers {

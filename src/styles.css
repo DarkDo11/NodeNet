@@ -313,26 +313,21 @@ button:disabled {
 .country-flag-icon {
   display: grid;
   width: 24px;
-  aspect-ratio: 3 / 2;
+  height: 24px;
   place-items: center;
   overflow: hidden;
-  border-radius: 4px;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
   color: var(--muted);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1;
 }
 
-.country-flag-icon svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
 .country-flag-icon.fallback {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.08);
+  font-size: 10px;
 }
 
 .country-cell {

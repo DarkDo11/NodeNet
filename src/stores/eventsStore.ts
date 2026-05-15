@@ -31,7 +31,18 @@ export const useEventsStore = create<EventsState>((set) => ({
   loadEvents: async () => {
     try {
       const events = await invoke<AlertEvent[]>("get_events");
-      set({ events, error: null });
+      set((state) => {
+        const knownIds = new Set(state.events.map((event) => event.id));
+        const newEvents = state.events.length > 0
+          ? events.filter((event) => !knownIds.has(event.id))
+          : [];
+
+        return {
+          events,
+          error: null,
+          toasts: [...newEvents.map(toastFromEvent), ...state.toasts].slice(0, 5),
+        };
+      });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     }
