@@ -63,6 +63,7 @@ fn main() {
             commands::set_poll_interval,
             commands::set_theme,
             commands::set_monitor_server,
+            commands::set_monitor_target,
             commands::install_monitor_agent,
             commands::sync_monitor_ssh_key,
             commands::get_metrics,

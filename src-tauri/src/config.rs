@@ -52,6 +52,8 @@ pub struct AppConfig {
     pub bastions: Vec<BastionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_bastion_id: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -62,6 +64,7 @@ impl Default for AppConfig {
             servers: Vec::new(),
             bastions: Vec::new(),
             monitor_server_id: None,
+            monitor_bastion_id: None,
         }
     }
 }
@@ -197,18 +200,42 @@ pub fn set_theme(theme: String) -> Result<AppConfig> {
 }
 
 pub fn set_monitor_server(server_id: Option<String>) -> Result<AppConfig> {
+    set_monitor_target(server_id, None)
+}
+
+pub fn set_monitor_target(
+    server_id: Option<String>,
+    bastion_id: Option<String>,
+) -> Result<AppConfig> {
     let mut config = load_config()?;
     let server_id = server_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let bastion_id = bastion_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if server_id.is_some() && bastion_id.is_some() {
+        bail!("monitor target must be either server or bastion");
+    }
 
     if let Some(server_id) = &server_id {
         if !config.servers.iter().any(|server| &server.id == server_id) {
             bail!("monitor server '{server_id}' was not found");
         }
     }
+    if let Some(bastion_id) = &bastion_id {
+        if !config
+            .bastions
+            .iter()
+            .any(|bastion| &bastion.id == bastion_id)
+        {
+            bail!("monitor bastion '{bastion_id}' was not found");
+        }
+    }
 
     config.monitor_server_id = server_id;
+    config.monitor_bastion_id = bastion_id;
     save_config(&config)?;
     Ok(config)
 }

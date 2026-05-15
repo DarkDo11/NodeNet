@@ -1,5 +1,5 @@
 use crate::{
-    config::{load_config, AppConfig, ServerConfig},
+    config::{load_config, AppConfig, BastionConfig, ServerConfig},
     metrics::ServerMetrics,
     ssh,
 };
@@ -40,25 +40,43 @@ pub fn is_enabled(config: &AppConfig) -> bool {
         .monitor_server_id
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty())
+        || config
+            .monitor_bastion_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 pub fn monitor_server(config: &AppConfig) -> Result<Option<ServerConfig>> {
-    let Some(server_id) = config
+    if let Some(server_id) = config
         .monitor_server_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
+    {
+        let server = config
+            .servers
+            .iter()
+            .find(|server| server.id == server_id)
+            .cloned()
+            .with_context(|| format!("monitor server '{server_id}' was not found"))?;
+        return Ok(Some(server));
+    }
 
-    let server = config
-        .servers
-        .iter()
-        .find(|server| server.id == server_id)
-        .cloned()
-        .with_context(|| format!("monitor server '{server_id}' was not found"))?;
-    Ok(Some(server))
+    if let Some(bastion_id) = config
+        .monitor_bastion_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let bastion = config
+            .bastions
+            .iter()
+            .find(|bastion| bastion.id == bastion_id)
+            .with_context(|| format!("monitor bastion '{bastion_id}' was not found"))?;
+        return Ok(Some(server_from_bastion(bastion)));
+    }
+
+    Ok(None)
 }
 
 pub async fn load_metrics_cache(app: &AppHandle) -> Result<Option<Value>> {
@@ -217,6 +235,26 @@ $SUDO systemctl status nodenet-monitor.service --no-pager --lines=0 || true
     let output = ssh::execute_combined(app, &monitor, &install_command, 120).await?;
     let _ = fs::remove_dir_all(temp_dir);
     Ok(output)
+}
+
+fn server_from_bastion(bastion: &BastionConfig) -> ServerConfig {
+    ServerConfig {
+        id: format!("bastion:{}", bastion.id),
+        name: bastion.name.clone(),
+        host: bastion.host.clone(),
+        ssh_port: bastion.port,
+        ssh_user: bastion.user.clone(),
+        country: "US".to_string(),
+        panel_url: None,
+        panel_user: None,
+        ssh_key_path: bastion.ssh_key_path.clone(),
+        bastion_host: None,
+        bastion_port: None,
+        bastion_user: None,
+        bastion_ssh_key_path: None,
+        ssh_key_passphrase: None,
+        ssl_verify: false,
+    }
 }
 
 pub async fn sync_server_ssh_key(app: &AppHandle, server_id: &str) -> Result<String> {

@@ -35,6 +35,7 @@ export interface AppConfig {
   servers: ServerConfig[];
   bastions: BastionConfig[];
   monitorServerId?: string | null;
+  monitorBastionId?: string | null;
 }
 
 export interface PingResult {

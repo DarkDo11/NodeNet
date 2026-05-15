@@ -38,6 +38,7 @@ export default function App() {
     servers,
     bastions,
     monitorServerId,
+    monitorBastionId,
     selectedServerId,
     statusById,
     configPollIntervalSec,
@@ -51,7 +52,7 @@ export default function App() {
     deleteBastion,
     savePollInterval,
     saveTheme,
-    saveMonitorServer,
+    saveMonitorTarget,
     pingAllServers,
   } = useServerStore();
   const {
@@ -203,7 +204,7 @@ export default function App() {
   }, [attachAlertListeners, loadEvents, pollIntervalSec]);
 
   useEffect(() => {
-    if (!monitorServerId) return;
+    if (!monitorServerId && !monitorBastionId) return;
 
     void loadMetricsCache();
     const timer = window.setInterval(() => {
@@ -211,7 +212,7 @@ export default function App() {
     }, Math.max(10, pollIntervalSec) * 1000);
 
     return () => window.clearInterval(timer);
-  }, [loadMetricsCache, monitorServerId, pollIntervalSec]);
+  }, [loadMetricsCache, monitorBastionId, monitorServerId, pollIntervalSec]);
 
   useEffect(() => {
     if (servers.length === 0) return;
@@ -521,11 +522,12 @@ export default function App() {
               servers={servers}
               bastions={bastions}
               monitorServerId={monitorServerId}
+              monitorBastionId={monitorBastionId}
               pollIntervalSec={pollIntervalSec}
               theme={theme}
               onPollIntervalChange={updatePollInterval}
               onThemeChange={updateTheme}
-              onMonitorServerChange={saveMonitorServer}
+              onMonitorTargetChange={saveMonitorTarget}
               onSaveServer={saveServer}
               onDeleteServer={deleteServer}
               onSaveBastion={upsertBastion}

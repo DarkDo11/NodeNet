@@ -6,6 +6,7 @@ interface ServerState {
   servers: ServerConfig[];
   bastions: BastionConfig[];
   monitorServerId: string | null;
+  monitorBastionId: string | null;
   selectedServerId: string | null;
   statusById: Record<string, PingResult>;
   configPollIntervalSec: number;
@@ -20,7 +21,7 @@ interface ServerState {
   deleteBastion: (bastionId: string) => Promise<void>;
   savePollInterval: (seconds: number) => Promise<void>;
   saveTheme: (theme: AppTheme) => Promise<void>;
-  saveMonitorServer: (serverId: string | null) => Promise<void>;
+  saveMonitorTarget: (target: { serverId: string | null; bastionId: string | null }) => Promise<void>;
   pingServer: (serverId: string) => Promise<void>;
   pingAllServers: () => Promise<void>;
 }
@@ -32,6 +33,7 @@ const applyConfig = (
   servers: config.servers,
   bastions: config.bastions ?? [],
   monitorServerId: config.monitorServerId ?? null,
+  monitorBastionId: config.monitorBastionId ?? null,
   configPollIntervalSec: config.pollIntervalSec,
   theme: config.theme,
   selectedServerId:
@@ -44,6 +46,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   bastions: [],
   monitorServerId: null,
+  monitorBastionId: null,
   selectedServerId: null,
   statusById: {},
   configPollIntervalSec: 10,
@@ -100,8 +103,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set(applyConfig(config, get().selectedServerId));
   },
 
-  saveMonitorServer: async (serverId) => {
-    const config = await invoke<AppConfig>("set_monitor_server", { serverId });
+  saveMonitorTarget: async ({ serverId, bastionId }) => {
+    const config = await invoke<AppConfig>("set_monitor_target", { serverId, bastionId });
     set(applyConfig(config, get().selectedServerId));
   },
 

@@ -20,11 +20,12 @@ interface SettingsProps {
   servers: ServerConfig[];
   bastions: BastionConfig[];
   monitorServerId: string | null;
+  monitorBastionId: string | null;
   pollIntervalSec: number;
   theme: AppTheme;
   onPollIntervalChange: (seconds: number) => Promise<void>;
   onThemeChange: (theme: AppTheme) => Promise<void>;
-  onMonitorServerChange: (serverId: string | null) => Promise<void>;
+  onMonitorTargetChange: (target: { serverId: string | null; bastionId: string | null }) => Promise<void>;
   onSaveServer: (server: ServerConfig) => Promise<void>;
   onDeleteServer: (serverId: string) => Promise<void>;
   onSaveBastion: (bastion: BastionConfig) => Promise<void>;
@@ -79,11 +80,12 @@ export default function Settings({
   servers,
   bastions,
   monitorServerId,
+  monitorBastionId,
   pollIntervalSec,
   theme,
   onPollIntervalChange,
   onThemeChange,
-  onMonitorServerChange,
+  onMonitorTargetChange,
   onSaveServer,
   onDeleteServer,
   onSaveBastion,
@@ -115,6 +117,12 @@ export default function Settings({
     () => servers.find((server) => server.id === setupServerId) ?? null,
     [setupServerId, servers],
   );
+  const monitorTargetValue = monitorServerId
+    ? `server:${monitorServerId}`
+    : monitorBastionId
+      ? `bastion:${monitorBastionId}`
+      : "";
+  const hasMonitor = Boolean(monitorServerId || monitorBastionId);
 
   useEffect(() => {
     if (!selectedServerId && servers[0] && !isCreatingServer) {
@@ -245,6 +253,37 @@ export default function Settings({
     }
   };
 
+  const updateMonitorTarget = async (value: string) => {
+    const [kind, id] = value.split(":", 2);
+    await onMonitorTargetChange({
+      serverId: kind === "server" && id ? id : null,
+      bastionId: kind === "bastion" && id ? id : null,
+    });
+  };
+
+  const detectPanelInfo = async () => {
+    const targetServer = selectedServer;
+    if (!targetServer) {
+      setError("Save the server before detecting 3x-ui.");
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    try {
+      const info = await invoke<PanelSetupInfo>("get_panel_setup_info", { serverId: targetServer.id });
+      const basePath = normalizePanelBasePath(info.webBasePath);
+      const panelUrl = `http://${targetServer.host}:${info.port}${basePath}`;
+      const updatedServer = { ...targetServer, panelUrl, panelUser: info.username };
+      updateForm("panelUrl", panelUrl);
+      updateForm("panelUser", info.username);
+      await onSaveServer(updatedServer);
+      setMessage("3x-ui URL, login and password detected");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const saveServer = async () => {
     setError("");
     const server = normalizedServer();
@@ -263,7 +302,7 @@ export default function Settings({
       if (wasNew) {
         setSetupServerId(server.id);
       }
-      if (wasNew && monitorServerId && syncMonitorKey && server.sshKeyPath) {
+      if (wasNew && hasMonitor && syncMonitorKey && server.sshKeyPath) {
         try {
           await invoke<string>("sync_monitor_ssh_key", { serverId: server.id });
           setMessage("Server saved and SSH key synced to monitor");
@@ -461,13 +500,18 @@ export default function Settings({
           <label className="field">
             <span>Monitor server</span>
             <select
-              value={monitorServerId ?? ""}
-              onChange={(event) => void onMonitorServerChange(event.target.value || null)}
+              value={monitorTargetValue}
+              onChange={(event) => void updateMonitorTarget(event.target.value)}
             >
               <option value="">This app</option>
               {servers.map((server) => (
-                <option key={server.id} value={server.id}>
-                  {server.name}
+                <option key={server.id} value={`server:${server.id}`}>
+                  Server · {server.name}
+                </option>
+              ))}
+              {bastions.map((bastion) => (
+                <option key={bastion.id} value={`bastion:${bastion.id}`}>
+                  Bastion · {bastion.name}
                 </option>
               ))}
             </select>
@@ -475,7 +519,7 @@ export default function Settings({
           <div className="settings-actions">
             <button
               className="command-button"
-              disabled={!monitorServerId || installingMonitor}
+              disabled={!hasMonitor || installingMonitor}
               onClick={() => void installMonitorAgent()}
             >
               <ServerCog size={16} className={installingMonitor ? "spin" : ""} />
@@ -541,7 +585,7 @@ export default function Settings({
               <input
                 type="checkbox"
                 checked={syncMonitorKey}
-                disabled={!isCreatingServer || !monitorServerId || !form.sshKeyPath?.trim()}
+                disabled={!isCreatingServer || !hasMonitor || !form.sshKeyPath?.trim()}
                 onChange={(event) => setSyncMonitorKey(event.target.checked)}
               />
             </label>
@@ -647,6 +691,10 @@ export default function Settings({
             <button className="command-button" disabled={testing} onClick={() => void testConnection()}>
               <Wifi size={16} className={testing ? "spin" : ""} />
               <span>{testing ? "Testing" : "Test"}</span>
+            </button>
+            <button className="command-button" disabled={!selectedServer} onClick={() => void detectPanelInfo()}>
+              <RefreshCw size={16} />
+              <span>Detect 3x-ui</span>
             </button>
             <button className="command-button danger" disabled={!selectedServer} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={16} />

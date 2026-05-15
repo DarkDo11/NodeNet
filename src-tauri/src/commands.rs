@@ -4,6 +4,7 @@ use crate::{
         config_path, delete_bastion as delete_bastion_config,
         delete_server as delete_server_config, find_server, load_config, save_config,
         set_monitor_server as set_monitor_server_config,
+        set_monitor_target as set_monitor_target_config,
         set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
         upsert_bastion as upsert_bastion_config, upsert_server as upsert_server_config, AppConfig,
         BastionConfig, ServerConfig,
@@ -153,6 +154,14 @@ pub fn set_theme(theme: String) -> Result<AppConfig, String> {
 #[tauri::command]
 pub fn set_monitor_server(server_id: Option<String>) -> Result<AppConfig, String> {
     set_monitor_server_config(server_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_monitor_target(
+    server_id: Option<String>,
+    bastion_id: Option<String>,
+) -> Result<AppConfig, String> {
+    set_monitor_target_config(server_id, bastion_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
