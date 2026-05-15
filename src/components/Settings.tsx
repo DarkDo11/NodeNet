@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import {
+  Download,
   KeyRound,
   Plus,
   RefreshCw,
@@ -103,9 +107,12 @@ export default function Settings({
   const [panelPassword, setPanelPassword] = useState("");
   const [setupServerId, setSetupServerId] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState("");
+  const [appVersion, setAppVersion] = useState("");
+  const [updateStatus, setUpdateStatus] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingMonitor, setInstallingMonitor] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -155,6 +162,12 @@ export default function Settings({
     void invoke<string>("get_config_path")
       .then(setConfigPath)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    void getVersion()
+      .then(setAppVersion)
+      .catch((err) => setUpdateStatus(err instanceof Error ? err.message : String(err)));
   }, []);
 
   const updateForm = <K extends keyof ServerConfig>(key: K, value: ServerConfig[K]) => {
@@ -250,6 +263,44 @@ export default function Settings({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setInstallingMonitor(false);
+    }
+  };
+
+  const checkAndInstallUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateStatus("Checking for updates...");
+    setError("");
+    let update: Awaited<ReturnType<typeof check>> = null;
+
+    try {
+      update = await check();
+      if (!update) {
+        setUpdateStatus("You are on the latest version.");
+        return;
+      }
+
+      setUpdateStatus(`Update ${update.version} found. Downloading...`);
+      let downloaded = 0;
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          downloaded = 0;
+          setUpdateStatus("Downloading update...");
+          return;
+        }
+        if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          setUpdateStatus(`Downloading update... ${Math.round(downloaded / 1024 / 1024)} MB`);
+          return;
+        }
+        setUpdateStatus("Update installed. Restarting...");
+      });
+      await relaunch();
+    } catch (err) {
+      setUpdateStatus("");
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingUpdate(false);
+      await update?.close().catch(() => undefined);
     }
   };
 
@@ -493,6 +544,9 @@ export default function Settings({
             <span>Theme</span>
             <select value={theme} onChange={(event) => void onThemeChange(event.target.value as AppTheme)}>
               <option value="dark">Dark</option>
+              <option value="purple-dark">Purple dark</option>
+              <option value="green-dark">Green dark</option>
+              <option value="full-dark">Full dark</option>
               <option value="contrast">Contrast</option>
               <option value="system">System</option>
             </select>
@@ -524,6 +578,28 @@ export default function Settings({
             >
               <ServerCog size={16} className={installingMonitor ? "spin" : ""} />
               <span>{installingMonitor ? "Installing" : "Install monitor"}</span>
+            </button>
+          </div>
+        </article>
+
+        <article className="settings-panel">
+          <div className="settings-panel-header">
+            <Download size={18} />
+            <h3>Application</h3>
+          </div>
+          <div className="version-row">
+            <span>Current version</span>
+            <strong>{appVersion ? `v${appVersion}` : "Detecting..."}</strong>
+          </div>
+          {updateStatus ? <p className="settings-hint">{updateStatus}</p> : null}
+          <div className="settings-actions">
+            <button
+              className="command-button primary"
+              disabled={checkingUpdate}
+              onClick={() => void checkAndInstallUpdate()}
+            >
+              <RefreshCw size={16} className={checkingUpdate ? "spin" : ""} />
+              <span>{checkingUpdate ? "Checking" : "Check & update"}</span>
             </button>
           </div>
         </article>

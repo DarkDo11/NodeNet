@@ -190,10 +190,12 @@ pub fn set_poll_interval(seconds: u64) -> Result<AppConfig> {
 pub fn set_theme(theme: String) -> Result<AppConfig> {
     let mut config = load_config()?;
     match theme.as_str() {
-        "dark" | "system" | "contrast" => {
+        "dark" | "purple-dark" | "green-dark" | "full-dark" | "system" | "contrast" => {
             config.theme = theme;
         }
-        other => bail!("unknown theme '{other}', allowed: dark, system, contrast"),
+        other => bail!(
+            "unknown theme '{other}', allowed: dark, purple-dark, green-dark, full-dark, system, contrast"
+        ),
     }
     save_config(&config)?;
     Ok(config)

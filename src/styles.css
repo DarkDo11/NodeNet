@@ -11,6 +11,8 @@
   --text: #f2f4f8;
   --muted: #9aa2b2;
   --faint: #697183;
+  --accent: #51d88a;
+  --accent-rgb: 81, 216, 138;
   --green: #51d88a;
   --blue: #57b9ff;
   --yellow: #ffcc66;
@@ -26,6 +28,8 @@ html[data-theme="light"] {
   --text: #151b26;
   --muted: #607086;
   --faint: #7e8ba0;
+  --accent: #168753;
+  --accent-rgb: 22, 135, 83;
   --green: #168753;
   --blue: #146ebe;
   --yellow: #9a6700;
@@ -40,6 +44,49 @@ html[data-theme="contrast"] {
   --text: #ffffff;
   --muted: #c2c8d5;
   --faint: #8e98aa;
+  --accent: #83f0ac;
+  --accent-rgb: 131, 240, 172;
+}
+
+html[data-theme="purple-dark"] {
+  --bg: #0b0713;
+  --panel: rgba(25, 18, 37, 0.74);
+  --panel-strong: rgba(37, 28, 55, 0.86);
+  --border: rgba(204, 179, 255, 0.15);
+  --text: #f7f2ff;
+  --muted: #b6aacd;
+  --faint: #817393;
+  --accent: #b774ff;
+  --accent-rgb: 183, 116, 255;
+  --blue: #78d8ff;
+  --yellow: #ffd56a;
+  --red: #ff738b;
+}
+
+html[data-theme="green-dark"] {
+  --bg: #06100c;
+  --panel: rgba(15, 31, 24, 0.76);
+  --panel-strong: rgba(23, 45, 35, 0.88);
+  --border: rgba(151, 255, 195, 0.14);
+  --text: #effff6;
+  --muted: #9bb9a9;
+  --faint: #6f887a;
+  --accent: #50f09a;
+  --accent-rgb: 80, 240, 154;
+  --green: #50f09a;
+  --blue: #58c7ff;
+}
+
+html[data-theme="full-dark"] {
+  --bg: #000000;
+  --panel: rgba(8, 8, 10, 0.88);
+  --panel-strong: rgba(14, 14, 18, 0.96);
+  --border: rgba(255, 255, 255, 0.1);
+  --text: #f5f5f7;
+  --muted: #a2a7b0;
+  --faint: #70757f;
+  --accent: #d8dee9;
+  --accent-rgb: 216, 222, 233;
 }
 
 * {
@@ -83,7 +130,7 @@ button:disabled {
 .output-modal pre,
 .command-output-terminal {
   scrollbar-width: thin;
-  scrollbar-color: rgba(81, 216, 138, 0.48) transparent;
+  scrollbar-color: rgba(var(--accent-rgb), 0.48) transparent;
 }
 
 .content::-webkit-scrollbar,
@@ -110,7 +157,7 @@ button:disabled {
 .command-output-terminal::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: rgba(81, 216, 138, 0.48);
+  background: rgba(var(--accent-rgb), 0.48);
   background-clip: content-box;
 }
 
@@ -119,7 +166,7 @@ button:disabled {
 .server-list::-webkit-scrollbar-thumb:hover,
 .output-modal pre::-webkit-scrollbar-thumb:hover,
 .command-output-terminal::-webkit-scrollbar-thumb:hover {
-  background: rgba(81, 216, 138, 0.68);
+  background: rgba(var(--accent-rgb), 0.68);
   background-clip: content-box;
 }
 
@@ -131,7 +178,7 @@ button:disabled {
   height: 100%;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.07), transparent 28%),
-    radial-gradient(circle at 82% 12%, rgba(81, 216, 138, 0.1), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(var(--accent-rgb), 0.1), transparent 24%),
     var(--bg);
 }
 
@@ -188,7 +235,7 @@ button:disabled {
   place-items: center;
   border: 1px solid var(--border);
   border-radius: 8px;
-  color: var(--green);
+  color: var(--accent);
   background: transparent;
 }
 
@@ -294,9 +341,9 @@ button:disabled {
 .server-selection-glow {
   position: absolute;
   inset: 0;
-  border: 1px solid rgba(81, 216, 138, 0.42);
+  border: 1px solid rgba(var(--accent-rgb), 0.42);
   border-radius: 8px;
-  background: linear-gradient(90deg, rgba(81, 216, 138, 0.13), rgba(87, 185, 255, 0.06));
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.13), rgba(87, 185, 255, 0.06));
   pointer-events: none;
 }
 
@@ -466,7 +513,7 @@ button:disabled {
 }
 
 .eyebrow {
-  color: var(--green);
+  color: var(--accent);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   text-transform: uppercase;
@@ -536,7 +583,7 @@ button:disabled {
 
 .range-selector button.active {
   color: var(--text);
-  background: rgba(81, 216, 138, 0.16);
+  background: rgba(var(--accent-rgb), 0.16);
 }
 
 .health-pill {
@@ -610,7 +657,7 @@ button:disabled {
 .action-message {
   overflow: hidden;
   max-width: 360px;
-  color: var(--green);
+  color: var(--accent);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -944,12 +991,12 @@ button:disabled {
 .checkbox-field input[type="checkbox"] {
   width: 18px;
   height: 18px;
-  accent-color: var(--green);
+  accent-color: var(--accent);
 }
 
 .field input:focus,
 .field select:focus {
-  border-color: rgba(81, 216, 138, 0.65);
+  border-color: rgba(var(--accent-rgb), 0.65);
 }
 
 .settings-actions {
@@ -1004,15 +1051,44 @@ button:disabled {
 }
 
 .command-button.primary {
-  border-color: rgba(81, 216, 138, 0.36);
-  color: var(--green);
-  background: rgba(81, 216, 138, 0.11);
+  border-color: rgba(var(--accent-rgb), 0.36);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.11);
 }
 
 .settings-message {
   margin: 0;
-  color: var(--green);
+  color: var(--accent);
   font-size: 13px;
+}
+
+.settings-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.version-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.version-row strong {
+  color: var(--accent);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
 }
 
 .server-table {
@@ -1050,7 +1126,7 @@ button:disabled {
 .preset-check input {
   width: 18px;
   height: 18px;
-  accent-color: var(--green);
+  accent-color: var(--accent);
 }
 
 .preset-check span {
@@ -1178,8 +1254,8 @@ button.server-table-row {
 
 .server-table-row.selected,
 button.server-table-row:hover {
-  border-color: rgba(81, 216, 138, 0.34);
-  background: rgba(81, 216, 138, 0.08);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .server-table-row strong {
@@ -1188,7 +1264,7 @@ button.server-table-row:hover {
 
 code {
   overflow: hidden;
-  color: var(--green);
+  color: var(--accent);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   text-overflow: ellipsis;

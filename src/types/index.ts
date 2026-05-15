@@ -27,7 +27,7 @@ export interface BastionConfig {
   sshKeyPath?: string | null;
 }
 
-export type AppTheme = "dark" | "contrast" | "system";
+export type AppTheme = "dark" | "purple-dark" | "green-dark" | "full-dark" | "contrast" | "system";
 
 export interface AppConfig {
   theme: AppTheme;
