@@ -3,11 +3,12 @@ use crate::{
     metrics::ServerMetrics,
     ssh,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -188,9 +189,7 @@ pub async fn load_events(app: &AppHandle) -> Result<Option<Vec<crate::alerts::Al
 pub async fn list_saved_servers(app: &AppHandle) -> Result<Vec<MonitorSavedServer>> {
     let config = load_config()?;
     let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
-    let raw = read_remote_file(app, &monitor, MONITOR_CONFIG_PATH, r#"{"servers":[]}"#).await?;
-    let value = parse_json_value_from_output(&raw, '{', '}')
-        .unwrap_or_else(|| serde_json::json!({ "servers": [] }));
+    let value = remote_monitor_config(app, &monitor).await?;
     let servers = value
         .get("servers")
         .and_then(Value::as_array)
@@ -269,6 +268,9 @@ if isinstance(runtime, dict):
     high_alerted = runtime.get("highCpuAlerted")
     if isinstance(high_alerted, list):
         runtime["highCpuAlerted"] = [item for item in high_alerted if str(item) != SERVER_ID]
+    fail_counts = runtime.get("failCounts")
+    if isinstance(fail_counts, dict):
+        fail_counts.pop(SERVER_ID, None)
     save_json(RUNTIME_PATH, runtime)
 
 safe_id = sanitize(SERVER_ID)
@@ -298,9 +300,39 @@ $SUDO systemctl start nodenet-monitor.service >/dev/null 2>&1 || true
 
 pub async fn install_agent(app: &AppHandle) -> Result<String> {
     let config = load_config()?;
+    install_agent_with_servers(app, config.servers.clone()).await
+}
+
+pub async fn reinstall_agent(app: &AppHandle) -> Result<String> {
+    let config = load_config()?;
+    let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
+    let monitor_server_ids = remote_monitor_config(app, &monitor)
+        .await?
+        .get("servers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| json_string(value, "id"))
+        .collect::<HashSet<_>>();
+    let servers = if monitor_server_ids.is_empty() {
+        config.servers.clone()
+    } else {
+        config
+            .servers
+            .iter()
+            .filter(|server| monitor_server_ids.contains(&server.id))
+            .cloned()
+            .collect()
+    };
+
+    install_agent_with_servers(app, servers).await
+}
+
+async fn install_agent_with_servers(app: &AppHandle, servers: Vec<ServerConfig>) -> Result<String> {
+    let config = load_config()?;
     let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
     let upload_id = Uuid::new_v4().simple().to_string();
-    let agent_servers = prepare_agent_servers(app, &monitor, &config.servers, &upload_id).await?;
+    let agent_servers = prepare_agent_servers(app, &monitor, &servers, &upload_id).await?;
     let agent_config = MonitorAgentConfig {
         poll_interval_sec: config.poll_interval_sec.max(5),
         monitor_server_id: &monitor.id,
@@ -490,11 +522,41 @@ pub async fn sync_server_ssh_key(app: &AppHandle, server_id: &str) -> Result<Str
     if !is_enabled(&config) {
         return Ok("Monitor server is not configured".to_string());
     }
-    if !config.servers.iter().any(|server| server.id == server_id) {
-        bail!("server '{server_id}' was not found");
+
+    let selected = config
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .cloned()
+        .with_context(|| format!("server '{server_id}' was not found"))?;
+    let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
+    let remote_config = remote_monitor_config(app, &monitor).await?;
+    let mut monitor_server_ids = remote_config
+        .get("servers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| json_string(value, "id"))
+        .collect::<HashSet<_>>();
+    monitor_server_ids.insert(selected.id.clone());
+
+    let mut servers = config
+        .servers
+        .iter()
+        .filter(|server| monitor_server_ids.contains(&server.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !servers.iter().any(|server| server.id == selected.id) {
+        servers.push(selected);
     }
 
-    install_agent(app).await
+    install_agent_with_servers(app, servers).await
+}
+
+async fn remote_monitor_config(app: &AppHandle, monitor: &ServerConfig) -> Result<Value> {
+    let raw = read_remote_file(app, monitor, MONITOR_CONFIG_PATH, r#"{"servers":[]}"#).await?;
+    Ok(parse_json_value_from_output(&raw, '{', '}')
+        .unwrap_or_else(|| serde_json::json!({ "servers": [] })))
 }
 
 fn latest_metrics_from_cache(cache: &Value, server_id: &str) -> Result<ServerMetrics> {

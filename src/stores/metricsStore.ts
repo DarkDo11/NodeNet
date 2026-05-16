@@ -413,7 +413,7 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
       ) as Record<string, ServerMetrics>;
       set({ historyByServer, metricsByServer });
     } catch {
-      set({ historyByServer: {} });
+      // Keep the last known cache when the remote monitor is briefly unreachable.
     }
   },
 

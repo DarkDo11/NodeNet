@@ -271,7 +271,7 @@ export default function Settings({
     setError("");
     setMessage("");
     try {
-      await invoke<string>("install_monitor_agent");
+      await invoke<string>(mode === "reinstall" ? "reinstall_monitor_agent" : "install_monitor_agent");
       await loadMonitorServers();
       setMessage(mode === "reinstall" ? "Monitor agent reinstalled and restarted" : "Monitor agent installed and started");
     } catch (err) {

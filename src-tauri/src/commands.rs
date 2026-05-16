@@ -173,6 +173,13 @@ pub async fn install_monitor_agent(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn reinstall_monitor_agent(app: AppHandle) -> Result<String, String> {
+    monitor::reinstall_agent(&app)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn sync_monitor_ssh_key(app: AppHandle, server_id: String) -> Result<String, String> {
     monitor::sync_server_ssh_key(&app, &server_id)
         .await

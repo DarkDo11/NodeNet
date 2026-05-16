@@ -65,6 +65,7 @@ fn main() {
             commands::set_monitor_server,
             commands::set_monitor_target,
             commands::install_monitor_agent,
+            commands::reinstall_monitor_agent,
             commands::sync_monitor_ssh_key,
             commands::list_monitor_servers,
             commands::delete_monitor_server,
