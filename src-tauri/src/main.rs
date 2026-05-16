@@ -94,6 +94,7 @@ fn main() {
             commands::test_server_connection,
             commands::run_preset_command,
             commands::run_streaming_command,
+            commands::get_remote_logs,
             commands::get_xray_config,
             commands::save_xray_config,
             commands::upload_routing_file,

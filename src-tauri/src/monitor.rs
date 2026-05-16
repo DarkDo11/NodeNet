@@ -4,7 +4,7 @@ use crate::{
     ssh,
 };
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -166,7 +166,7 @@ pub async fn load_events(app: &AppHandle) -> Result<Option<Vec<crate::alerts::Al
     };
 
     let raw = read_remote_file(app, &monitor, REMOTE_EVENTS_PATH, "[]").await?;
-    let events = serde_json::from_str(&raw).context("failed to parse monitor events")?;
+    let events = parse_monitor_events(&raw).context("failed to parse monitor events")?;
     Ok(Some(events))
 }
 
@@ -391,6 +391,37 @@ fn monitor_saved_server_from_value(
         panel_url: json_string(value, "panelUrl"),
         ssh_key_path: json_string(value, "sshKeyPath"),
         has_local_config,
+    })
+}
+
+fn parse_monitor_events(raw: &str) -> Result<Vec<crate::alerts::AlertEvent>> {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    Ok(items
+        .iter()
+        .filter_map(monitor_event_from_value)
+        .collect::<Vec<_>>())
+}
+
+fn monitor_event_from_value(value: &Value) -> Option<crate::alerts::AlertEvent> {
+    let timestamp = json_string(value, "timestamp")
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+    let message = json_string(value, "message")?;
+    Some(crate::alerts::AlertEvent {
+        id: json_string(value, "id").unwrap_or_else(|| Uuid::new_v4().to_string()),
+        level: json_string(value, "level").unwrap_or_else(|| "info".to_string()),
+        kind: json_string(value, "kind").unwrap_or_else(|| "monitor".to_string()),
+        server_id: json_string(value, "serverId"),
+        server_name: json_string(value, "serverName"),
+        message,
+        timestamp,
     })
 }
 

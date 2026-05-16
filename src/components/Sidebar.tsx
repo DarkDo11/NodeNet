@@ -14,7 +14,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import CountryFlag from "./CountryFlag";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
-export type AppView = "dashboard" | "inbounds" | "clients" | "routing" | "terminal" | "events" | "settings";
+export type AppView = "dashboard" | "inbounds" | "clients" | "routing" | "terminal" | "events" | "logs" | "settings";
 
 interface SidebarProps {
   servers: ServerConfig[];
@@ -95,6 +95,14 @@ export default function Sidebar({
         >
           <ScrollText size={16} />
           <span>Events</span>
+        </button>
+        <button
+          className={activeView === "logs" ? "nav-tab active" : "nav-tab"}
+          onClick={() => onChangeView("logs")}
+          title="Logs"
+        >
+          <ScrollText size={16} />
+          <span>Logs</span>
         </button>
         <button
           className={activeView === "settings" ? "nav-tab active" : "nav-tab"}

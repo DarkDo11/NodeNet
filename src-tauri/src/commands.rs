@@ -612,6 +612,21 @@ pub async fn run_streaming_command(
 }
 
 #[tauri::command]
+pub async fn get_remote_logs(
+    app: AppHandle,
+    target_kind: String,
+    target_id: Option<String>,
+    log_kind: String,
+) -> Result<String, String> {
+    let target = logs_target_server(&target_kind, target_id.as_deref())
+        .map_err(|error| error.to_string())?;
+    let command = logs_command(&log_kind);
+    ssh::execute_combined(&app, &target, command, 60)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_xray_config(app: AppHandle, server_id: String) -> Result<Value, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
     three_x_ui::get_xray_config(&app, &server)
@@ -642,6 +657,72 @@ pub async fn upload_routing_file(
     three_x_ui::upload_routing_file(&app, &server, &local_path, remote_filename)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn logs_target_server(target_kind: &str, target_id: Option<&str>) -> anyhow::Result<ServerConfig> {
+    let config = load_config()?;
+    match target_kind {
+        "monitor" => monitor::monitor_server(&config)?
+            .ok_or_else(|| anyhow::anyhow!("monitor target is not configured")),
+        "server" => {
+            let server_id = target_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("server is not selected"))?;
+            config
+                .servers
+                .into_iter()
+                .find(|server| server.id == server_id)
+                .ok_or_else(|| anyhow::anyhow!("server '{server_id}' was not found"))
+        }
+        "bastion" => {
+            let bastion_id = target_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("bastion is not selected"))?;
+            let bastion = config
+                .bastions
+                .into_iter()
+                .find(|bastion| bastion.id == bastion_id)
+                .ok_or_else(|| anyhow::anyhow!("bastion '{bastion_id}' was not found"))?;
+            Ok(server_from_bastion_for_logs(&bastion))
+        }
+        other => Err(anyhow::anyhow!("unknown logs target '{other}'")),
+    }
+}
+
+fn logs_command(log_kind: &str) -> &'static str {
+    match log_kind {
+        "monitor" => {
+            "journalctl -u nodenet-monitor.service -u nodenet-monitor.timer -n 240 --no-pager -o short-iso 2>&1 || systemctl status nodenet-monitor.service nodenet-monitor.timer --no-pager 2>&1 || true"
+        }
+        "panel" => {
+            "journalctl -u x-ui -u 3x-ui -u xray -n 240 --no-pager -o short-iso 2>&1 || tail -n 240 /var/log/x-ui.log /var/log/xray/*.log 2>&1 || true"
+        }
+        _ => {
+            "journalctl -n 240 --no-pager -o short-iso 2>&1 || tail -n 240 /var/log/syslog /var/log/messages 2>&1 || true"
+        }
+    }
+}
+
+fn server_from_bastion_for_logs(bastion: &BastionConfig) -> ServerConfig {
+    ServerConfig {
+        id: format!("bastion:{}", bastion.id),
+        name: bastion.name.clone(),
+        host: bastion.host.clone(),
+        ssh_port: bastion.port,
+        ssh_user: bastion.user.clone(),
+        country: "US".to_string(),
+        panel_url: None,
+        panel_user: None,
+        ssh_key_path: bastion.ssh_key_path.clone(),
+        bastion_host: None,
+        bastion_port: None,
+        bastion_user: None,
+        bastion_ssh_key_path: None,
+        ssh_key_passphrase: None,
+        ssl_verify: false,
+    }
 }
 
 #[tauri::command(rename = "get_panel_setup_info")]

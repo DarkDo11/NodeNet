@@ -1906,6 +1906,49 @@ code {
   color: var(--text);
 }
 
+.logs-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 14px;
+  min-height: 0;
+}
+
+.logs-panel {
+  display: grid;
+  min-width: 0;
+  min-height: 560px;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(28px) saturate(1.2);
+}
+
+.logs-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.55fr);
+  gap: 12px;
+}
+
+.logs-output {
+  min-height: 390px;
+  max-height: 58vh;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--text);
+  background: #07080b;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .toast-host {
   position: fixed;
   right: 18px;
@@ -2043,6 +2086,11 @@ code {
   }
 
   .events-table {
+    grid-template-columns: 1fr;
+  }
+
+  .logs-grid,
+  .logs-toolbar {
     grid-template-columns: 1fr;
   }
 

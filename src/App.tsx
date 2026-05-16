@@ -5,6 +5,7 @@ import ConfirmModal from "./components/ConfirmModal";
 import Dashboard from "./components/Dashboard";
 import EventsLog from "./components/EventsLog";
 import Inbounds from "./components/Inbounds";
+import LogsView from "./components/LogsView";
 import Onboarding from "./components/Onboarding";
 import QrModal from "./components/QrModal";
 import RoutingEditor from "./components/RoutingEditor";
@@ -330,7 +331,6 @@ export default function App() {
         activeView={activeView}
         onSelectServer={(serverId) => {
           selectServer(serverId);
-          setActiveView("dashboard");
         }}
         onChangeView={setActiveView}
       />
@@ -515,6 +515,15 @@ export default function App() {
               onRefresh={() => {
                 void loadEvents();
               }}
+            />
+          ) : null}
+          {!showOnboarding && activeView === "logs" ? (
+            <LogsView
+              servers={servers}
+              bastions={bastions}
+              monitorServerId={monitorServerId}
+              monitorBastionId={monitorBastionId}
+              selectedServerId={selectedServerId}
             />
           ) : null}
           {!showOnboarding && activeView === "settings" ? (
