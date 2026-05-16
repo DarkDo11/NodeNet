@@ -381,10 +381,7 @@ pub async fn open_bastion_tunnel(
     }
 
     if let Some(askpass) = &askpass {
-        command
-            .env("SSH_ASKPASS", askpass.path())
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("DISPLAY", ":0");
+        apply_askpass_env(&mut command, Some(askpass));
     }
 
     command.arg(format!("{user}@{host}"));
@@ -681,13 +678,6 @@ async fn download_file_once(
     remote_path: &str,
     local_path: &Path,
 ) -> Result<()> {
-    let connection = get_or_create_connection(app, server).await?;
-    let control_path = {
-        let mut connection = connection.lock().await;
-        connection.last_used = Instant::now();
-        connection.control_path.clone()
-    };
-
     if let Some(parent) = local_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create backup directory {}", parent.display()))?;
@@ -706,6 +696,7 @@ async fn download_file_once(
     )
     .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
+    let askpass = create_transfer_askpass(app, server).await?;
     let mut command = Command::new("sftp");
     command
         .kill_on_drop(true)
@@ -716,9 +707,19 @@ async fn download_file_once(
         .arg("-o")
         .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPersist=no")
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
+        .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
-        .arg(format!("ControlPath={}", control_path.display()))
+        .arg("PreferredAuthentications=publickey,password")
+        .arg("-o")
+        .arg("NumberOfPasswordPrompts=1")
         .arg("-b")
         .arg(batch_path.path());
 
@@ -731,6 +732,7 @@ async fn download_file_once(
     }
 
     apply_bastion_proxy(&mut command, server);
+    apply_askpass_env(&mut command, askpass.as_ref());
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
@@ -741,14 +743,8 @@ async fn download_file_once(
     .await
     {
         Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            invalidate_connection(server, &control_path).await;
-            return Err(anyhow!("failed to execute sftp: {error}"));
-        }
-        Err(_) => {
-            invalidate_connection(server, &control_path).await;
-            bail!("sftp download timed out");
-        }
+        Ok(Err(error)) => return Err(anyhow!("failed to execute sftp: {error}")),
+        Err(_) => bail!("sftp download timed out"),
     };
 
     if !output.status.success() {
@@ -756,9 +752,6 @@ async fn download_file_once(
             "sftp download failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        if is_connection_reuse_error(&message) {
-            invalidate_connection(server, &control_path).await;
-        }
         return Err(anyhow!(message));
     }
 
@@ -785,13 +778,6 @@ async fn upload_file_once(
         bail!("local file does not exist: {}", local_path.display());
     }
 
-    let connection = get_or_create_connection(app, server).await?;
-    let control_path = {
-        let mut connection = connection.lock().await;
-        connection.last_used = Instant::now();
-        connection.control_path.clone()
-    };
-
     let batch_path = TempPathGuard::new(
         std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4())),
     );
@@ -805,6 +791,7 @@ async fn upload_file_once(
     )
     .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
+    let askpass = create_transfer_askpass(app, server).await?;
     let mut command = Command::new("sftp");
     command
         .kill_on_drop(true)
@@ -815,9 +802,19 @@ async fn upload_file_once(
         .arg("-o")
         .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPersist=no")
+        .arg("-o")
+        .arg("ServerAliveInterval=5")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
+        .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
-        .arg(format!("ControlPath={}", control_path.display()))
+        .arg("PreferredAuthentications=publickey,password")
+        .arg("-o")
+        .arg("NumberOfPasswordPrompts=1")
         .arg("-b")
         .arg(batch_path.path());
 
@@ -830,6 +827,7 @@ async fn upload_file_once(
     }
 
     apply_bastion_proxy(&mut command, server);
+    apply_askpass_env(&mut command, askpass.as_ref());
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
@@ -840,14 +838,8 @@ async fn upload_file_once(
     .await
     {
         Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            invalidate_connection(server, &control_path).await;
-            return Err(anyhow!("failed to execute sftp: {error}"));
-        }
-        Err(_) => {
-            invalidate_connection(server, &control_path).await;
-            bail!("sftp upload timed out");
-        }
+        Ok(Err(error)) => return Err(anyhow!("failed to execute sftp: {error}")),
+        Err(_) => bail!("sftp upload timed out"),
     };
 
     if !output.status.success() {
@@ -855,9 +847,6 @@ async fn upload_file_once(
             "sftp upload failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        if is_connection_reuse_error(&message) {
-            invalidate_connection(server, &control_path).await;
-        }
         return Err(anyhow!(message));
     }
 
@@ -1143,6 +1132,28 @@ fn create_askpass_script(
     }
 
     Ok(Some(TempPathGuard::new(path)))
+}
+
+async fn create_transfer_askpass(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Option<TempPathGuard>> {
+    let target_secret = if server.ssh_key_path.is_some() {
+        read_key_passphrase(app, server).await?
+    } else {
+        read_password(app, server).await?
+    };
+    let bastion_secret = read_bastion_password(app, server).await?;
+    create_askpass_script(target_secret.as_deref(), bastion_secret.as_deref(), server)
+}
+
+fn apply_askpass_env(command: &mut Command, askpass: Option<&TempPathGuard>) {
+    if let Some(askpass) = askpass {
+        command
+            .env("SSH_ASKPASS", askpass.path())
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0");
+    }
 }
 
 fn apply_bastion_proxy(command: &mut Command, server: &ServerConfig) {
