@@ -9,7 +9,7 @@ use crate::{
         upsert_bastion as upsert_bastion_config, upsert_server as upsert_server_config, AppConfig,
         BastionConfig, ServerConfig,
     },
-    metrics::{collect, ServerMetrics},
+    metrics::{collect, offline, ServerMetrics},
     monitor,
     ssh::{
         self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
@@ -25,6 +25,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -196,17 +197,20 @@ pub async fn delete_monitor_server(app: AppHandle, server_id: String) -> Result<
 
 #[tauri::command]
 pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetrics, String> {
-    if let Some(metrics) = monitor::latest_metrics(&app, &server_id)
-        .await
-        .map_err(|error| error.to_string())?
+    if let Ok(Ok(Some(metrics))) = tokio::time::timeout(
+        Duration::from_secs(6),
+        monitor::latest_metrics(&app, &server_id),
+    )
+    .await
     {
         return Ok(metrics);
     }
 
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    collect(&app, &server)
-        .await
-        .map_err(|error| error.to_string())
+    match tokio::time::timeout(Duration::from_secs(18), collect(&app, &server)).await {
+        Ok(Ok(metrics)) => Ok(metrics),
+        Ok(Err(_)) | Err(_) => Ok(offline(&server.id)),
+    }
 }
 
 #[tauri::command]
