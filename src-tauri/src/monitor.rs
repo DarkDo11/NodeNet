@@ -100,7 +100,8 @@ pub async fn load_metrics_cache(app: &AppHandle) -> Result<Option<Value>> {
     };
 
     let raw = read_remote_file(app, &monitor, REMOTE_METRICS_PATH, "{}").await?;
-    let value = serde_json::from_str(&raw).context("failed to parse monitor metrics cache")?;
+    let value = parse_json_value_from_output(&raw, '{', '}')
+        .unwrap_or_else(|| Value::Object(Default::default()));
     Ok(Some(value))
 }
 
@@ -174,7 +175,8 @@ pub async fn list_saved_servers(app: &AppHandle) -> Result<Vec<MonitorSavedServe
     let config = load_config()?;
     let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
     let raw = read_remote_file(app, &monitor, MONITOR_CONFIG_PATH, r#"{"servers":[]}"#).await?;
-    let value = serde_json::from_str::<Value>(&raw).context("failed to parse monitor config")?;
+    let value = parse_json_value_from_output(&raw, '{', '}')
+        .unwrap_or_else(|| serde_json::json!({ "servers": [] }));
     let servers = value
         .get("servers")
         .and_then(Value::as_array)
@@ -395,7 +397,7 @@ fn monitor_saved_server_from_value(
 }
 
 fn parse_monitor_events(raw: &str) -> Result<Vec<crate::alerts::AlertEvent>> {
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+    let Some(value) = parse_json_value_from_output(raw, '[', ']') else {
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
@@ -423,6 +425,21 @@ fn monitor_event_from_value(value: &Value) -> Option<crate::alerts::AlertEvent> 
         message,
         timestamp,
     })
+}
+
+fn parse_json_value_from_output(raw: &str, open: char, close: char) -> Option<Value> {
+    let trimmed = raw.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Some(value);
+    }
+
+    let start = trimmed.find(open)?;
+    let end = trimmed.rfind(close)?;
+    if end <= start {
+        return None;
+    }
+
+    serde_json::from_str::<Value>(&trimmed[start..=end]).ok()
 }
 
 fn json_string(value: &Value, key: &str) -> Option<String> {
@@ -612,7 +629,7 @@ async fn read_remote_file(
         path = shell_single_quote(remote_path),
         fallback = shell_single_quote(fallback),
     );
-    ssh::execute_combined(app, monitor, &command, 30).await
+    ssh::execute(app, monitor, &command).await
 }
 
 fn service_unit() -> &'static str {
