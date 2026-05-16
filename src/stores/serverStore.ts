@@ -71,8 +71,6 @@ const softenTransientOffline = (
   return result;
 };
 
-const pingingServers = new Set<string>();
-
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   bastions: [],
@@ -140,11 +138,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   pingServer: async (serverId) => {
-    if (pingingServers.has(serverId)) {
-      return;
-    }
-
-    pingingServers.add(serverId);
     try {
       const result = await invoke<PingResult>("ping_server", { serverId });
       set((state) => ({
@@ -170,8 +163,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
           ),
         },
       }));
-    } finally {
-      pingingServers.delete(serverId);
     }
   },
 
