@@ -369,8 +369,11 @@ async fn install_agent_with_servers(app: &AppHandle, servers: Vec<ServerConfig>)
         r#"set -e
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+$SUDO systemctl stop nodenet-monitor.timer nodenet-monitor.service >/dev/null 2>&1 || true
+$SUDO systemctl reset-failed nodenet-monitor.timer nodenet-monitor.service >/dev/null 2>&1 || true
 $SUDO mkdir -p {config_dir} {data_dir}
 $SUDO mkdir -p {keys_dir}
+$SUDO python3 -m py_compile {agent_tmp}
 $SUDO mv {agent_tmp} {agent_path}
 $SUDO mv {config_tmp} {config_path}
 $SUDO mv {service_tmp} {service_path}
@@ -386,8 +389,13 @@ for key_tmp in /tmp/nodenet-monitor-key-*.{upload_id}.tmp; do
   $SUDO chmod 600 "{keys_dir}/$key_name"
 done
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now nodenet-monitor.timer
-$SUDO systemctl start nodenet-monitor.service
+$SUDO systemctl enable nodenet-monitor.timer
+$SUDO systemctl start nodenet-monitor.timer
+if ! $SUDO systemctl start nodenet-monitor.service; then
+  $SUDO systemctl status nodenet-monitor.service nodenet-monitor.timer --no-pager --lines=40 || true
+  $SUDO journalctl -u nodenet-monitor.service -u nodenet-monitor.timer -n 120 --no-pager || true
+  exit 1
+fi
 $SUDO systemctl status nodenet-monitor.service --no-pager --lines=0 || true
 "#,
         config_dir = MONITOR_CONFIG_DIR,
@@ -877,6 +885,12 @@ def save_json(path, value):
         json.dump(value, handle, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def ensure_dict(value):
+    return value if isinstance(value, dict) else {}
+
+def ensure_list(value):
+    return value if isinstance(value, list) else []
+
 def parse_float(value, default=0.0):
     try:
         return float(str(value).strip().replace(",", "."))
@@ -1049,22 +1063,36 @@ def push_event(events, level, kind, server, message):
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    config = load_json(CONFIG_PATH, {})
-    cache = load_json(METRICS_PATH, {})
-    events = load_json(EVENTS_PATH, [])
-    runtime = load_json(RUNTIME_PATH, {"downServers": [], "highCpuSince": {}, "highCpuAlerted": [], "failCounts": {}})
-    down = set(runtime.get("downServers") or [])
-    high_since = dict(runtime.get("highCpuSince") or {})
-    high_alerted = set(runtime.get("highCpuAlerted") or [])
-    fail_counts = dict(runtime.get("failCounts") or {})
+    config = ensure_dict(load_json(CONFIG_PATH, {}))
+    cache = ensure_dict(load_json(METRICS_PATH, {}))
+    events = ensure_list(load_json(EVENTS_PATH, []))
+    runtime = ensure_dict(load_json(RUNTIME_PATH, {"downServers": [], "highCpuSince": {}, "highCpuAlerted": [], "failCounts": {}}))
+    down_servers = runtime.get("downServers")
+    high_since_raw = runtime.get("highCpuSince")
+    high_alerted_raw = runtime.get("highCpuAlerted")
+    fail_counts_raw = runtime.get("failCounts")
+    down = set(str(item) for item in down_servers) if isinstance(down_servers, list) else set()
+    high_since = high_since_raw if isinstance(high_since_raw, dict) else {}
+    high_alerted = set(str(item) for item in high_alerted_raw) if isinstance(high_alerted_raw, list) else set()
+    fail_counts = fail_counts_raw if isinstance(fail_counts_raw, dict) else {}
     now = time.time()
 
-    for server in config.get("servers") or []:
+    servers = config.get("servers")
+    if not isinstance(servers, list):
+        servers = []
+
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
         server_id = server.get("id")
         if not server_id:
             continue
         history = cache.get(server_id) or []
+        if not isinstance(history, list):
+            history = []
         previous = history[-1] if history else None
+        if not isinstance(previous, dict):
+            previous = None
         try:
             point = run_metrics(config, server)
             fail_counts.pop(server_id, None)
