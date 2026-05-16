@@ -531,7 +531,11 @@ async fn execute_once_with_options(
     };
 
     if !output.status.success() {
-        return Err(anyhow!("ssh command failed: {}", combined.trim()));
+        let message = format!("ssh command failed: {}", combined.trim());
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
+        return Err(anyhow!(message));
     }
 
     Ok(combined)
@@ -689,16 +693,18 @@ async fn download_file_once(
             .with_context(|| format!("failed to create backup directory {}", parent.display()))?;
     }
 
-    let batch_path = std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4()));
+    let batch_path = TempPathGuard::new(
+        std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4())),
+    );
     fs::write(
-        &batch_path,
+        batch_path.path(),
         format!(
             "get {} {}\n",
             sftp_quote(remote_path),
             sftp_quote(&local_path.display().to_string())
         ),
     )
-    .with_context(|| format!("failed to write sftp batch {}", batch_path.display()))?;
+    .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
     let mut command = Command::new("sftp");
     command
@@ -714,7 +720,7 @@ async fn download_file_once(
         .arg("-o")
         .arg(format!("ControlPath={}", control_path.display()))
         .arg("-b")
-        .arg(&batch_path);
+        .arg(batch_path.path());
 
     if let Some(key_path) = &server.ssh_key_path {
         command
@@ -728,21 +734,32 @@ async fn download_file_once(
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
-    let output = timeout(
+    let output = match timeout(
         Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
         command.output(),
     )
     .await
-    .context("sftp download timed out")?
-    .context("failed to execute sftp")?;
-
-    let _ = fs::remove_file(batch_path);
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            invalidate_connection(server, &control_path).await;
+            return Err(anyhow!("failed to execute sftp: {error}"));
+        }
+        Err(_) => {
+            invalidate_connection(server, &control_path).await;
+            bail!("sftp download timed out");
+        }
+    };
 
     if !output.status.success() {
-        return Err(anyhow!(
+        let message = format!(
             "sftp download failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        );
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
+        return Err(anyhow!(message));
     }
 
     Ok(())
@@ -775,16 +792,18 @@ async fn upload_file_once(
         connection.control_path.clone()
     };
 
-    let batch_path = std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4()));
+    let batch_path = TempPathGuard::new(
+        std::env::temp_dir().join(format!("nodenet-sftp-{}.batch", Uuid::new_v4())),
+    );
     fs::write(
-        &batch_path,
+        batch_path.path(),
         format!(
             "put {} {}\n",
             sftp_quote(&local_path.display().to_string()),
             sftp_quote(remote_path)
         ),
     )
-    .with_context(|| format!("failed to write sftp batch {}", batch_path.display()))?;
+    .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
     let mut command = Command::new("sftp");
     command
@@ -800,7 +819,7 @@ async fn upload_file_once(
         .arg("-o")
         .arg(format!("ControlPath={}", control_path.display()))
         .arg("-b")
-        .arg(&batch_path);
+        .arg(batch_path.path());
 
     if let Some(key_path) = &server.ssh_key_path {
         command
@@ -814,21 +833,32 @@ async fn upload_file_once(
 
     command.arg(format!("{}@{}", server.ssh_user, server.host));
 
-    let output = timeout(
+    let output = match timeout(
         Duration::from_secs(SSH_COMMAND_TIMEOUT_SECS),
         command.output(),
     )
     .await
-    .context("sftp upload timed out")?
-    .context("failed to execute sftp")?;
-
-    let _ = fs::remove_file(batch_path);
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            invalidate_connection(server, &control_path).await;
+            return Err(anyhow!("failed to execute sftp: {error}"));
+        }
+        Err(_) => {
+            invalidate_connection(server, &control_path).await;
+            bail!("sftp upload timed out");
+        }
+    };
 
     if !output.status.success() {
-        return Err(anyhow!(
+        let message = format!(
             "sftp upload failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        );
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
+        return Err(anyhow!(message));
     }
 
     Ok(())
@@ -875,6 +905,29 @@ pub async fn close_server_connections(server: &ServerConfig) {
         let control_path = connection.lock().await.control_path.clone();
         close_master(server, &control_path).await;
     }
+}
+
+async fn invalidate_connection(server: &ServerConfig, control_path: &Path) {
+    let account = connection_pool_account(server);
+    let connection = {
+        let mut pool = SSH_POOL.lock().await;
+        let matches = if let Some(connection) = pool.get(&account) {
+            connection.lock().await.control_path == control_path
+        } else {
+            false
+        };
+
+        if matches {
+            pool.remove(&account)
+        } else {
+            None
+        }
+    };
+
+    if connection.is_some() {
+        close_master(server, control_path).await;
+    }
+    let _ = fs::remove_file(control_path);
 }
 
 fn ssh_socket_dir() -> PathBuf {
@@ -1043,6 +1096,16 @@ fn is_auth_error(error: &anyhow::Error) -> bool {
         || message.contains("permission denied")
         || message.contains("too many authentication failures")
         || message.contains("publickey,password")
+}
+
+fn is_connection_reuse_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("mux_client_request_session")
+        || message.contains("read from master failed")
+        || message.contains("broken pipe")
+        || message.contains("control socket")
+        || message.contains("connection closed by")
+        || message.contains("connection reset")
 }
 
 fn create_askpass_script(
