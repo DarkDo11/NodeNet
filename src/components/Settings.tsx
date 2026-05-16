@@ -123,6 +123,7 @@ export default function Settings({
   const [installingMonitor, setInstallingMonitor] = useState(false);
   const [monitorServers, setMonitorServers] = useState<MonitorSavedServer[]>([]);
   const [loadingMonitorServers, setLoadingMonitorServers] = useState(false);
+  const [addingMonitorServerId, setAddingMonitorServerId] = useState<string | null>(null);
   const [deletingMonitorServerId, setDeletingMonitorServerId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmMonitorDelete, setConfirmMonitorDelete] = useState<MonitorSavedServer | null>(null);
@@ -363,6 +364,23 @@ export default function Settings({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeletingMonitorServerId(null);
+    }
+  };
+
+  const addSelectedServerToMonitor = async () => {
+    if (!selectedServer) return;
+
+    setAddingMonitorServerId(selectedServer.id);
+    setError("");
+    setMessage("");
+    try {
+      await invoke<string>("sync_monitor_ssh_key", { serverId: selectedServer.id });
+      await loadMonitorServers();
+      setMessage(`${selectedServer.name} added to monitor`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddingMonitorServerId(null);
     }
   };
 
@@ -664,14 +682,24 @@ export default function Settings({
               <ServerCog size={18} />
               <h3>Monitor Servers</h3>
             </div>
-            <button
-              className="command-button"
-              disabled={!hasMonitor || loadingMonitorServers}
-              onClick={() => void loadMonitorServers()}
-            >
-              <RefreshCw size={16} className={loadingMonitorServers ? "spin" : ""} />
-              <span>{loadingMonitorServers ? "Loading" : "Refresh"}</span>
-            </button>
+            <div className="settings-actions">
+              <button
+                className="command-button primary"
+                disabled={!hasMonitor || !selectedServer || addingMonitorServerId === selectedServer?.id}
+                onClick={() => void addSelectedServerToMonitor()}
+              >
+                <Plus size={16} />
+                <span>{addingMonitorServerId === selectedServer?.id ? "Adding" : "Add selected"}</span>
+              </button>
+              <button
+                className="command-button"
+                disabled={!hasMonitor || loadingMonitorServers}
+                onClick={() => void loadMonitorServers()}
+              >
+                <RefreshCw size={16} className={loadingMonitorServers ? "spin" : ""} />
+                <span>{loadingMonitorServers ? "Loading" : "Refresh"}</span>
+              </button>
+            </div>
           </div>
           <div className="monitor-server-table">
             {monitorServers.map((server) => (
