@@ -36,6 +36,7 @@ const RANGE_MS: Record<Exclude<MetricsRange, "all">, number> = {
 };
 const MAX_RENDER_POINTS = 800;
 const RANGE_STORAGE_KEY = "nodenet:metrics-range";
+let isLoadingMetricsCache = false;
 
 const numberOr = (value: unknown, fallback: unknown = 0) => {
   const number = typeof value === "number" ? value : Number(value);
@@ -226,6 +227,22 @@ const normalizeHistory = (serverId: string, rawHistory: unknown): MetricPoint[] 
   return recomputeRates(points);
 };
 
+const mergeHistories = (current: MetricPoint[], incoming: MetricPoint[]) => {
+  if (current.length === 0) return applyRetention(incoming);
+  if (incoming.length === 0) return applyRetention(current);
+
+  const pointsByKey = new Map<string, MetricPoint>();
+  for (const point of [...current, ...incoming]) {
+    pointsByKey.set(`${point.serverId}:${point.timestamp}`, point);
+  }
+
+  return applyRetention(
+    recomputeRates(
+      Array.from(pointsByKey.values()).sort((a, b) => a.timestamp - b.timestamp),
+    ),
+  );
+};
+
 const recomputeRates = (points: MetricPoint[]) =>
   points.map((point, index) => {
     const previous = points[index - 1];
@@ -397,23 +414,39 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
   },
 
   loadMetricsCache: async () => {
+    if (isLoadingMetricsCache) {
+      return;
+    }
+
+    isLoadingMetricsCache = true;
     try {
       const rawCache = await invoke<Record<string, unknown>>("load_metrics_cache");
-      const historyByServer = Object.fromEntries(
-        Object.entries(rawCache).map(([serverId, history]) => [
-          serverId,
-          applyRetention(normalizeHistory(serverId, history)),
-        ]),
-      );
-      const metricsByServer = Object.fromEntries(
-        Object.entries(historyByServer).flatMap(([serverId, history]) => {
+      if (!rawCache || typeof rawCache !== "object" || Array.isArray(rawCache)) {
+        return;
+      }
+
+      set((state) => {
+        const historyByServer = { ...state.historyByServer };
+        for (const [serverId, rawHistory] of Object.entries(rawCache)) {
+          const incoming = normalizeHistory(serverId, rawHistory);
+          if (incoming.length === 0) continue;
+          historyByServer[serverId] = mergeHistories(historyByServer[serverId] ?? [], incoming);
+        }
+
+        const metricsByServer = { ...state.metricsByServer };
+        for (const [serverId, history] of Object.entries(historyByServer)) {
           const latest = history[history.length - 1];
-          return latest ? [[serverId, pointToMetrics(latest)]] : [];
-        }),
-      ) as Record<string, ServerMetrics>;
-      set({ historyByServer, metricsByServer });
+          if (latest) {
+            metricsByServer[serverId] = pointToMetrics(latest);
+          }
+        }
+
+        return { historyByServer, metricsByServer };
+      });
     } catch {
       // Keep the last known cache when the remote monitor is briefly unreachable.
+    } finally {
+      isLoadingMetricsCache = false;
     }
   },
 

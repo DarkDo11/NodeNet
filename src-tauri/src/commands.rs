@@ -223,11 +223,15 @@ pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetr
 #[tauri::command]
 pub async fn ping_server(app: AppHandle, server_id: String) -> Result<PingResult, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    if let Some(result) = monitor::ping_from_monitor(&app, &server)
-        .await
-        .map_err(|error| error.to_string())?
+    if let Ok(Ok(Some(result))) = tokio::time::timeout(
+        Duration::from_secs(6),
+        monitor::ping_from_monitor(&app, &server),
+    )
+    .await
     {
-        return Ok(result);
+        if result.status != "unknown" {
+            return Ok(result);
+        }
     }
 
     Ok(ping(&app, &server).await)
@@ -972,9 +976,8 @@ fn public_key_path_for_private(private_key_path: &Path) -> PathBuf {
 
 #[tauri::command]
 pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
-    if let Some(cache) = monitor::load_metrics_cache(&app)
-        .await
-        .map_err(|error| error.to_string())?
+    if let Ok(Ok(Some(cache))) =
+        tokio::time::timeout(Duration::from_secs(6), monitor::load_metrics_cache(&app)).await
     {
         return Ok(cache);
     }

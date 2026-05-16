@@ -4,7 +4,7 @@ use crate::{
     ssh,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -24,6 +24,9 @@ const MONITOR_SERVICE_PATH: &str = "/etc/systemd/system/nodenet-monitor.service"
 const MONITOR_TIMER_PATH: &str = "/etc/systemd/system/nodenet-monitor.timer";
 const REMOTE_METRICS_PATH: &str = "/var/lib/nodenet-monitor/metrics-cache.json";
 const REMOTE_EVENTS_PATH: &str = "/var/lib/nodenet-monitor/events.json";
+const MIN_MONITOR_SAMPLE_AGE_SECS: u64 = 60;
+const MAX_MONITOR_SAMPLE_AGE_SECS: u64 = 900;
+const MONITOR_SAMPLE_INTERVALS_BEFORE_STALE: u64 = 4;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,17 +110,21 @@ pub async fn load_metrics_cache(app: &AppHandle) -> Result<Option<Value>> {
 }
 
 pub async fn latest_metrics(app: &AppHandle, server_id: &str) -> Result<Option<ServerMetrics>> {
+    let config = load_config()?;
+    let max_age = monitor_sample_max_age(&config);
     let Some(cache) = load_metrics_cache(app).await? else {
         return Ok(None);
     };
 
-    latest_metrics_from_cache(&cache, server_id).map(Some)
+    latest_metrics_from_cache(&cache, server_id, max_age).map(Some)
 }
 
 pub async fn ping_from_monitor(
     app: &AppHandle,
     server: &ServerConfig,
 ) -> Result<Option<ssh::PingResult>> {
+    let config = load_config()?;
+    let max_age = monitor_sample_max_age(&config);
     let Some(cache) = load_metrics_cache(app).await? else {
         return Ok(None);
     };
@@ -131,18 +138,20 @@ pub async fn ping_from_monitor(
             checked_at: Utc::now(),
         }));
     };
-    let Some(latest) = stable_latest_metric(history) else {
+    let Some(latest) = stable_latest_metric(history, max_age) else {
         return Ok(Some(ssh::PingResult {
             server_id: server.id.clone(),
             latency_ms: None,
             status: "unknown".to_string(),
-            message: "No monitor sample yet".to_string(),
+            message: "Monitor sample is stale".to_string(),
             checked_at: Utc::now(),
         }));
     };
 
     let latest_sample = history.last().unwrap_or(latest);
-    let is_transient_failure = !metric_is_online(latest_sample) && metric_is_online(latest);
+    let is_transient_failure = metric_is_fresh(latest_sample, Utc::now(), max_age)
+        && !metric_is_online(latest_sample)
+        && metric_is_online(latest);
 
     let is_online = latest
         .get("isOnline")
@@ -154,9 +163,7 @@ pub async fn ping_from_monitor(
         .map(|value| value.round().max(0.0) as u128);
     let status = if !is_online {
         "offline"
-    } else if ping_ms.is_some_and(|value| value > 1_000) {
-        "warning"
-    } else if is_transient_failure {
+    } else if is_transient_failure || ping_ms.is_some_and(|value| value > 1_000) {
         "warning"
     } else {
         "online"
@@ -559,30 +566,65 @@ async fn remote_monitor_config(app: &AppHandle, monitor: &ServerConfig) -> Resul
         .unwrap_or_else(|| serde_json::json!({ "servers": [] })))
 }
 
-fn latest_metrics_from_cache(cache: &Value, server_id: &str) -> Result<ServerMetrics> {
+fn latest_metrics_from_cache(
+    cache: &Value,
+    server_id: &str,
+    max_age: ChronoDuration,
+) -> Result<ServerMetrics> {
     let history = cache
         .get(server_id)
         .and_then(Value::as_array)
         .with_context(|| format!("monitor has no metrics for '{server_id}' yet"))?;
-    let latest = stable_latest_metric(history)
+    let latest = stable_latest_metric(history, max_age)
         .with_context(|| format!("monitor has no metrics for '{server_id}' yet"))?;
 
     serde_json::from_value::<ServerMetrics>(latest.clone())
         .context("failed to decode latest monitor metrics")
 }
 
-fn stable_latest_metric(history: &[Value]) -> Option<&Value> {
-    let latest = history.last()?;
+fn stable_latest_metric(history: &[Value], max_age: ChronoDuration) -> Option<&Value> {
+    let now = Utc::now();
+    let latest_index = history
+        .iter()
+        .rposition(|value| metric_is_fresh(value, now, max_age))?;
+    let latest = history.get(latest_index)?;
     if metric_is_online(latest) {
         return Some(latest);
     }
 
-    let previous = history.iter().rev().nth(1)?;
-    if metric_is_online(previous) {
-        return Some(previous);
+    if let Some(previous) = latest_index
+        .checked_sub(1)
+        .and_then(|index| history.get(index))
+    {
+        if metric_is_online(previous) && metric_is_fresh(previous, now, max_age) {
+            return Some(previous);
+        }
     }
 
     Some(latest)
+}
+
+fn monitor_sample_max_age(config: &AppConfig) -> ChronoDuration {
+    let seconds = config
+        .poll_interval_sec
+        .max(5)
+        .saturating_mul(MONITOR_SAMPLE_INTERVALS_BEFORE_STALE)
+        .clamp(MIN_MONITOR_SAMPLE_AGE_SECS, MAX_MONITOR_SAMPLE_AGE_SECS);
+    ChronoDuration::seconds(seconds as i64)
+}
+
+fn metric_is_fresh(value: &Value, now: DateTime<Utc>, max_age: ChronoDuration) -> bool {
+    let Some(timestamp) = metric_timestamp(value) else {
+        return false;
+    };
+    let age = now.signed_duration_since(timestamp);
+    age <= max_age && age >= -ChronoDuration::minutes(5)
+}
+
+fn metric_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    json_string(value, "timestamp")
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn metric_is_online(value: &Value) -> bool {
@@ -782,19 +824,52 @@ export LC_ALL=C
 export LANG=C
 export LANGUAGE=C
 export LC_NUMERIC=C
+RAM_TOTAL=0
+RAM_USED=0
+if command -v free >/dev/null 2>&1; then
 read RAM_TOTAL RAM_USED <<EOF
-$(free -m | awk '/Mem:/ {print $2, $3}')
+$(free -m | awk '/Mem:/ {print $2 + 0, $3 + 0; found = 1} END {if (!found) print "0 0"}')
 EOF
+elif [ -r /proc/meminfo ]; then
+read RAM_TOTAL RAM_USED <<EOF
+$(awk '
+  /^MemTotal:/ { total = int($2 / 1024) }
+  /^MemAvailable:/ { available = int($2 / 1024) }
+  END {
+    if (total < 0) total = 0;
+    if (available < 0) available = 0;
+    used = total - available;
+    if (used < 0) used = 0;
+    print total, used;
+  }
+' /proc/meminfo)
+EOF
+fi
+DISK_TOTAL=--
+DISK_USED=--
+DISK_PERCENT=0
+if command -v df >/dev/null 2>&1; then
 read DISK_TOTAL DISK_USED DISK_PERCENT <<EOF
-$(df -h / | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5}')
+$(df -P -h / 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5 + 0; found = 1} END {if (!found) print "-- -- 0"}')
 EOF
-LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
+fi
+LOAD_AVERAGE="0 0 0"
+if [ -r /proc/loadavg ]; then
+  LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
+fi
 LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
 CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
-if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ] 2>/dev/null; then CPU_CORES=1; fi
+CPU_CORES=$(printf '%s\n' "$CPU_CORES" | awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1 > 0 {print $1}')
+if [ -z "$CPU_CORES" ]; then CPU_CORES=1; fi
 CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" 'BEGIN { if (cores <= 0 || load_value < 0) exit 1; printf "%.1f", (load_value / cores) * 100; }')
 if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then CPU=; fi
-UPTIME_SEC=$(cut -d. -f1 /proc/uptime)
+UPTIME_SEC=0
+if [ -r /proc/uptime ]; then
+  UPTIME_SEC=$(awk '{printf "%.0f", $1}' /proc/uptime)
+fi
+RX_BYTES=0
+TX_BYTES=0
+if [ -r /proc/net/dev ]; then
 read RX_BYTES TX_BYTES <<EOF
 $(awk 'NR>2 {
   iface = $1; gsub(":", "", iface);
@@ -805,6 +880,7 @@ $(awk 'NR>2 {
   }
 } END { if (matched > 0) printf "%.0f %.0f\n", rx, tx; else printf "%.0f %.0f\n", fallback_rx, fallback_tx; }' /proc/net/dev)
 EOF
+fi
 printf 'cpu_percent=%s\n' "$CPU"
 printf 'cpu_cores=%s\n' "$CPU_CORES"
 printf 'ram_total_mb=%s\n' "$RAM_TOTAL"
@@ -1080,4 +1156,54 @@ fn shell_single_quote(value: &str) -> String {
 #[allow(dead_code)]
 fn _temp_file_path(directory: &Path, name: &str) -> PathBuf {
     directory.join(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn metric(timestamp: DateTime<Utc>, is_online: bool, ping_ms: f64) -> Value {
+        json!({
+            "timestamp": timestamp.to_rfc3339(),
+            "isOnline": is_online,
+            "pingMs": ping_ms,
+        })
+    }
+
+    #[test]
+    fn stable_latest_metric_ignores_stale_history() {
+        let history = vec![metric(Utc::now() - ChronoDuration::minutes(10), true, 12.0)];
+
+        assert!(stable_latest_metric(&history, ChronoDuration::seconds(60)).is_none());
+    }
+
+    #[test]
+    fn stable_latest_metric_softens_single_fresh_offline_sample() {
+        let now = Utc::now();
+        let history = vec![
+            metric(now - ChronoDuration::seconds(20), true, 12.0),
+            metric(now, false, 0.0),
+        ];
+
+        let selected = stable_latest_metric(&history, ChronoDuration::seconds(60))
+            .expect("fresh history should select a metric");
+
+        assert_eq!(selected.get("pingMs").and_then(Value::as_f64), Some(12.0));
+    }
+
+    #[test]
+    fn stable_latest_metric_keeps_repeated_fresh_offline_sample() {
+        let now = Utc::now();
+        let history = vec![
+            metric(now - ChronoDuration::seconds(30), true, 12.0),
+            metric(now - ChronoDuration::seconds(10), false, 0.0),
+            metric(now, false, 0.0),
+        ];
+
+        let selected = stable_latest_metric(&history, ChronoDuration::seconds(60))
+            .expect("fresh history should select a metric");
+
+        assert!(!metric_is_online(selected));
+    }
 }

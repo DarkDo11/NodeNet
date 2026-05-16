@@ -10,16 +10,43 @@ export LC_ALL=C
 export LANG=C
 export LANGUAGE=C
 export LC_NUMERIC=C
+RAM_TOTAL=0
+RAM_USED=0
+if command -v free >/dev/null 2>&1; then
 read RAM_TOTAL RAM_USED <<EOF
-$(free -m | awk '/Mem:/ {print $2, $3}')
+$(free -m | awk '/Mem:/ {print $2 + 0, $3 + 0; found = 1} END {if (!found) print "0 0"}')
 EOF
+elif [ -r /proc/meminfo ]; then
+read RAM_TOTAL RAM_USED <<EOF
+$(awk '
+  /^MemTotal:/ { total = int($2 / 1024) }
+  /^MemAvailable:/ { available = int($2 / 1024) }
+  END {
+    if (total < 0) total = 0;
+    if (available < 0) available = 0;
+    used = total - available;
+    if (used < 0) used = 0;
+    print total, used;
+  }
+' /proc/meminfo)
+EOF
+fi
+DISK_TOTAL=--
+DISK_USED=--
+DISK_PERCENT=0
+if command -v df >/dev/null 2>&1; then
 read DISK_TOTAL DISK_USED DISK_PERCENT <<EOF
-$(df -h / | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5}')
+$(df -P -h / 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5 + 0; found = 1} END {if (!found) print "-- -- 0"}')
 EOF
-LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
+fi
+LOAD_AVERAGE="0 0 0"
+if [ -r /proc/loadavg ]; then
+  LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
+fi
 LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
 CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
-if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ] 2>/dev/null; then CPU_CORES=1; fi
+CPU_CORES=$(printf '%s\n' "$CPU_CORES" | awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1 > 0 {print $1}')
+if [ -z "$CPU_CORES" ]; then CPU_CORES=1; fi
 CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" '
   BEGIN {
     if (cores <= 0 || load_value < 0) {
@@ -30,7 +57,13 @@ CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" '
 if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then
   CPU=
 fi
-UPTIME_SEC=$(cut -d. -f1 /proc/uptime)
+UPTIME_SEC=0
+if [ -r /proc/uptime ]; then
+  UPTIME_SEC=$(awk '{printf "%.0f", $1}' /proc/uptime)
+fi
+RX_BYTES=0
+TX_BYTES=0
+if [ -r /proc/net/dev ]; then
 read RX_BYTES TX_BYTES <<EOF
 $(awk 'NR>2 {
   iface = $1;
@@ -51,6 +84,7 @@ $(awk 'NR>2 {
   }
 }' /proc/net/dev)
 EOF
+fi
 printf 'cpu_percent=%s\n' "$CPU"
 printf 'cpu_cores=%s\n' "$CPU_CORES"
 printf 'ram_total_mb=%s\n' "$RAM_TOTAL"
@@ -144,11 +178,10 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         }
     }
 
-    let load_average = parse_load_average(
-        values
-            .get("load_average")
-            .context("missing load_average metric")?,
-    )?;
+    let load_average = values
+        .get("load_average")
+        .and_then(|value| parse_load_average(value).ok())
+        .unwrap_or([0.0, 0.0, 0.0]);
     let cpu_cores = values
         .get("cpu_cores")
         .and_then(|value| parse_u64_value(value).ok())
@@ -158,12 +191,12 @@ fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
         .ok()
         .filter(|value| *value >= 0.0)
         .unwrap_or_else(|| (load_average[0] / cpu_cores as f64) * 100.0);
-    let ram_total_mb = parse_u64(&values, "ram_total_mb")?;
-    let ram_used_mb = parse_u64(&values, "ram_used_mb")?;
-    let disk_percent = parse_f64(&values, "disk_percent")?;
-    let uptime_sec = parse_u64(&values, "uptime_sec")?;
-    let rx_bytes = parse_u64(&values, "rx_bytes")?;
-    let tx_bytes = parse_u64(&values, "tx_bytes")?;
+    let ram_total_mb = parse_u64_or_default(&values, "ram_total_mb", 0);
+    let ram_used_mb = parse_u64_or_default(&values, "ram_used_mb", 0);
+    let disk_percent = parse_f64_or_default(&values, "disk_percent", 0.0);
+    let uptime_sec = parse_u64_or_default(&values, "uptime_sec", 0);
+    let rx_bytes = parse_u64_or_default(&values, "rx_bytes", 0);
+    let tx_bytes = parse_u64_or_default(&values, "tx_bytes", 0);
     let total_rx_bytes = values
         .get("total_rx_bytes")
         .and_then(|value| value.parse::<u64>().ok())
@@ -225,6 +258,14 @@ fn parse_u64(values: &HashMap<String, String>, key: &str) -> Result<u64> {
         .with_context(|| format!("missing {key} metric"))?;
 
     parse_u64_value(raw).with_context(|| format!("invalid {key} metric"))
+}
+
+fn parse_f64_or_default(values: &HashMap<String, String>, key: &str, default: f64) -> f64 {
+    parse_f64(values, key).unwrap_or(default)
+}
+
+fn parse_u64_or_default(values: &HashMap<String, String>, key: &str, default: u64) -> u64 {
+    parse_u64(values, key).unwrap_or(default)
 }
 
 fn parse_u64_value(raw: &str) -> Result<u64> {
