@@ -38,6 +38,18 @@ export interface AppConfig {
   monitorBastionId?: string | null;
 }
 
+export interface MonitorSavedServer {
+  id: string;
+  name: string;
+  host: string;
+  sshPort: number;
+  sshUser: string;
+  country: string;
+  panelUrl?: string | null;
+  sshKeyPath?: string | null;
+  hasLocalConfig: boolean;
+}
+
 export interface PingResult {
   serverId: string;
   latencyMs: number | null;

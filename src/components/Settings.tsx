@@ -18,7 +18,14 @@ import { useEffect, useMemo, useState } from "react";
 import ConfirmModal from "./ConfirmModal";
 import CountryFlag from "./CountryFlag";
 import SetupPresets from "./SetupPresets";
-import type { AppTheme, BastionConfig, PanelSetupInfo, ServerConfig, TestConnectionResult } from "../types";
+import type {
+  AppTheme,
+  BastionConfig,
+  MonitorSavedServer,
+  PanelSetupInfo,
+  ServerConfig,
+  TestConnectionResult,
+} from "../types";
 
 interface SettingsProps {
   servers: ServerConfig[];
@@ -114,7 +121,11 @@ export default function Settings({
   const [testing, setTesting] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingMonitor, setInstallingMonitor] = useState(false);
+  const [monitorServers, setMonitorServers] = useState<MonitorSavedServer[]>([]);
+  const [loadingMonitorServers, setLoadingMonitorServers] = useState(false);
+  const [deletingMonitorServerId, setDeletingMonitorServerId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmMonitorDelete, setConfirmMonitorDelete] = useState<MonitorSavedServer | null>(null);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -258,6 +269,7 @@ export default function Settings({
     setMessage("");
     try {
       await invoke<string>("install_monitor_agent");
+      await loadMonitorServers();
       setMessage("Monitor agent installed and started");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -310,6 +322,48 @@ export default function Settings({
       serverId: kind === "server" && id ? id : null,
       bastionId: kind === "bastion" && id ? id : null,
     });
+  };
+
+  const loadMonitorServers = async () => {
+    if (!hasMonitor) {
+      setMonitorServers([]);
+      return;
+    }
+
+    setLoadingMonitorServers(true);
+    setError("");
+    try {
+      const savedServers = await invoke<MonitorSavedServer[]>("list_monitor_servers");
+      setMonitorServers(savedServers);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingMonitorServers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!hasMonitor) {
+      setMonitorServers([]);
+      return;
+    }
+
+    void loadMonitorServers();
+  }, [hasMonitor, monitorBastionId, monitorServerId]);
+
+  const deleteMonitorServer = async (server: MonitorSavedServer) => {
+    setDeletingMonitorServerId(server.id);
+    setError("");
+    setMessage("");
+    try {
+      const output = await invoke<string>("delete_monitor_server", { serverId: server.id });
+      await loadMonitorServers();
+      setMessage(output.trim() || "Monitor server deleted");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingMonitorServerId(null);
+    }
   };
 
   const detectPanelInfo = async () => {
@@ -601,6 +655,58 @@ export default function Settings({
               <RefreshCw size={16} className={checkingUpdate ? "spin" : ""} />
               <span>{checkingUpdate ? "Checking" : "Check & update"}</span>
             </button>
+          </div>
+        </article>
+
+        <article className="settings-panel wide">
+          <div className="settings-panel-header split">
+            <div>
+              <ServerCog size={18} />
+              <h3>Monitor Servers</h3>
+            </div>
+            <button
+              className="command-button"
+              disabled={!hasMonitor || loadingMonitorServers}
+              onClick={() => void loadMonitorServers()}
+            >
+              <RefreshCw size={16} className={loadingMonitorServers ? "spin" : ""} />
+              <span>{loadingMonitorServers ? "Loading" : "Refresh"}</span>
+            </button>
+          </div>
+          <div className="monitor-server-table">
+            {monitorServers.map((server) => (
+              <div key={server.id} className="monitor-server-row">
+                <strong>{server.name}</strong>
+                <span className="country-cell">
+                  <CountryFlag country={server.country} />
+                </span>
+                <code>{server.sshUser}@{server.host}:{server.sshPort}</code>
+                <code>{server.panelUrl ?? "--"}</code>
+                <span className={server.hasLocalConfig ? "monitor-badge local" : "monitor-badge"}>
+                  {server.hasLocalConfig ? "Local" : "Remote only"}
+                </span>
+                <button
+                  className="icon-button danger"
+                  disabled={deletingMonitorServerId === server.id}
+                  onClick={() => setConfirmMonitorDelete(server)}
+                  title="Delete from monitor"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+            {!hasMonitor ? (
+              <div className="empty-state compact">
+                <ServerCog size={18} />
+                <span>No monitor selected</span>
+              </div>
+            ) : null}
+            {hasMonitor && monitorServers.length === 0 && !loadingMonitorServers ? (
+              <div className="empty-state compact">
+                <ServerCog size={18} />
+                <span>No monitor servers found</span>
+              </div>
+            ) : null}
           </div>
         </article>
 
@@ -908,6 +1014,19 @@ export default function Settings({
           onConfirm={() => {
             setConfirmDelete(false);
             void removeServer();
+          }}
+        />
+      ) : null}
+      {confirmMonitorDelete ? (
+        <ConfirmModal
+          title={`Delete ${confirmMonitorDelete.name} from monitor?`}
+          message="This removes the remote monitor entry, metrics cache, events and monitor key files. Local server settings stay unchanged."
+          confirmLabel="Delete from monitor"
+          onCancel={() => setConfirmMonitorDelete(null)}
+          onConfirm={() => {
+            const server = confirmMonitorDelete;
+            setConfirmMonitorDelete(null);
+            void deleteMonitorServer(server);
           }}
         />
       ) : null}

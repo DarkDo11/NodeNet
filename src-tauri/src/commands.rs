@@ -179,6 +179,22 @@ pub async fn sync_monitor_ssh_key(app: AppHandle, server_id: String) -> Result<S
 }
 
 #[tauri::command]
+pub async fn list_monitor_servers(
+    app: AppHandle,
+) -> Result<Vec<monitor::MonitorSavedServer>, String> {
+    monitor::list_saved_servers(&app)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_monitor_server(app: AppHandle, server_id: String) -> Result<String, String> {
+    monitor::delete_saved_server(&app, &server_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetrics, String> {
     if let Some(metrics) = monitor::latest_metrics(&app, &server_id)
         .await

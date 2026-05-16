@@ -35,6 +35,20 @@ struct MonitorAgentConfig<'a> {
     servers: &'a [ServerConfig],
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSavedServer {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub ssh_port: u16,
+    pub ssh_user: String,
+    pub country: String,
+    pub panel_url: Option<String>,
+    pub ssh_key_path: Option<String>,
+    pub has_local_config: bool,
+}
+
 pub fn is_enabled(config: &AppConfig) -> bool {
     config
         .monitor_server_id
@@ -156,6 +170,116 @@ pub async fn load_events(app: &AppHandle) -> Result<Option<Vec<crate::alerts::Al
     Ok(Some(events))
 }
 
+pub async fn list_saved_servers(app: &AppHandle) -> Result<Vec<MonitorSavedServer>> {
+    let config = load_config()?;
+    let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
+    let raw = read_remote_file(app, &monitor, MONITOR_CONFIG_PATH, r#"{"servers":[]}"#).await?;
+    let value = serde_json::from_str::<Value>(&raw).context("failed to parse monitor config")?;
+    let servers = value
+        .get("servers")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|value| monitor_saved_server_from_value(value, &config))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(servers)
+}
+
+pub async fn delete_saved_server(app: &AppHandle, server_id: &str) -> Result<String> {
+    let config = load_config()?;
+    let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
+    let server_id_json = serde_json::to_string(server_id)?;
+    let script = r#"
+import json
+import os
+import pathlib
+
+SERVER_ID = __SERVER_ID__
+CONFIG_PATH = pathlib.Path("/etc/nodenet-monitor/config.json")
+DATA_DIR = pathlib.Path("/var/lib/nodenet-monitor")
+METRICS_PATH = DATA_DIR / "metrics-cache.json"
+EVENTS_PATH = DATA_DIR / "events.json"
+RUNTIME_PATH = DATA_DIR / "runtime.json"
+KEYS_DIR = DATA_DIR / "keys"
+
+def load_json(path, fallback):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return fallback
+
+def save_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pathlib.Path(str(path) + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def sanitize(value):
+    cleaned = "".join(character if (character.isascii() and character.isalnum()) or character in "._-" else "_" for character in value)
+    cleaned = cleaned.strip("._-")
+    return cleaned or "server"
+
+config = load_json(CONFIG_PATH, {"servers": []})
+servers = config.get("servers") if isinstance(config.get("servers"), list) else []
+before = len(servers)
+config["servers"] = [server for server in servers if str(server.get("id") or "") != SERVER_ID]
+removed = before - len(config["servers"])
+save_json(CONFIG_PATH, config)
+
+metrics = load_json(METRICS_PATH, {})
+if isinstance(metrics, dict):
+    metrics.pop(SERVER_ID, None)
+    save_json(METRICS_PATH, metrics)
+
+events = load_json(EVENTS_PATH, [])
+if isinstance(events, list):
+    events = [event for event in events if str(event.get("serverId") or "") != SERVER_ID]
+    save_json(EVENTS_PATH, events)
+
+runtime = load_json(RUNTIME_PATH, {})
+if isinstance(runtime, dict):
+    down = runtime.get("downServers")
+    if isinstance(down, list):
+        runtime["downServers"] = [item for item in down if str(item) != SERVER_ID]
+    high_since = runtime.get("highCpuSince")
+    if isinstance(high_since, dict):
+        high_since.pop(SERVER_ID, None)
+    high_alerted = runtime.get("highCpuAlerted")
+    if isinstance(high_alerted, list):
+        runtime["highCpuAlerted"] = [item for item in high_alerted if str(item) != SERVER_ID]
+    save_json(RUNTIME_PATH, runtime)
+
+safe_id = sanitize(SERVER_ID)
+for suffix in ("target", "bastion"):
+    key_path = KEYS_DIR / f"{safe_id}-{suffix}"
+    try:
+        key_path.unlink()
+    except FileNotFoundError:
+        pass
+
+print(f"Removed {removed} monitor server record(s) for {SERVER_ID}")
+"#
+    .replace("__SERVER_ID__", &server_id_json);
+    let command = format!(
+        r#"set -e
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+$SUDO python3 - <<'PY'
+{script}
+PY
+$SUDO systemctl start nodenet-monitor.service >/dev/null 2>&1 || true
+"#
+    );
+
+    ssh::execute_combined(app, &monitor, &command, 60).await
+}
+
 pub async fn install_agent(app: &AppHandle) -> Result<String> {
     let config = load_config()?;
     let monitor = monitor_server(&config)?.context("Choose a monitor server first")?;
@@ -235,6 +359,48 @@ $SUDO systemctl status nodenet-monitor.service --no-pager --lines=0 || true
     let output = ssh::execute_combined(app, &monitor, &install_command, 120).await?;
     let _ = fs::remove_dir_all(temp_dir);
     Ok(output)
+}
+
+fn monitor_saved_server_from_value(
+    value: &Value,
+    config: &AppConfig,
+) -> Option<MonitorSavedServer> {
+    let id = json_string(value, "id")?;
+    let name = json_string(value, "name").unwrap_or_else(|| id.clone());
+    let host = json_string(value, "host").unwrap_or_default();
+    let ssh_user = json_string(value, "sshUser").unwrap_or_else(|| "root".to_string());
+    let country = json_string(value, "country").unwrap_or_else(|| "US".to_string());
+    let ssh_port = value
+        .get("sshPort")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
+        })
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(22);
+    let has_local_config = config.servers.iter().any(|server| server.id == id);
+
+    Some(MonitorSavedServer {
+        id,
+        name,
+        host,
+        ssh_port,
+        ssh_user,
+        country,
+        panel_url: json_string(value, "panelUrl"),
+        ssh_key_path: json_string(value, "sshKeyPath"),
+        has_local_config,
+    })
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn server_from_bastion(bastion: &BastionConfig) -> ServerConfig {

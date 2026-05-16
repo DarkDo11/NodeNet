@@ -1096,6 +1096,50 @@ button:disabled {
   gap: 8px;
 }
 
+.monitor-server-table {
+  display: grid;
+  gap: 8px;
+}
+
+.monitor-server-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 54px minmax(220px, 1fr) minmax(220px, 1fr) 96px 36px;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.monitor-server-row strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  border: 1px solid rgba(255, 204, 102, 0.24);
+  border-radius: 999px;
+  color: var(--yellow);
+  background: rgba(255, 204, 102, 0.09);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.monitor-badge.local {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
 .setup-presets {
   gap: 16px;
 }
