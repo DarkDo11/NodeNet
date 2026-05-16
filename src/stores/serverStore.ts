@@ -42,6 +42,35 @@ const applyConfig = (
       : config.servers[0]?.id ?? null,
 });
 
+const softenTransientOffline = (
+  result: PingResult,
+  previous: PingResult | undefined,
+): PingResult => {
+  if (result.status !== "offline") return result;
+  if (previous?.message.startsWith("Check failed once")) {
+    return {
+      ...result,
+      message: `Repeated check failed: ${result.message}`,
+    };
+  }
+  if (!previous || previous.status === "offline" || previous.message.startsWith("Repeated check failed")) {
+    return {
+      ...result,
+      message: result.message,
+    };
+  }
+
+  if (previous.status === "online" || previous.status === "warning") {
+    return {
+      ...result,
+      status: "warning",
+      message: `Check failed once: ${result.message}`,
+    };
+  }
+
+  return result;
+};
+
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   bastions: [],
@@ -114,7 +143,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set((state) => ({
         statusById: {
           ...state.statusById,
-          [serverId]: result,
+          [serverId]: softenTransientOffline(result, state.statusById[serverId]),
         },
       }));
     } catch (error) {
@@ -122,13 +151,16 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set((state) => ({
         statusById: {
           ...state.statusById,
-          [serverId]: {
-            serverId,
-            latencyMs: null,
-            status: "offline",
-            message: error instanceof Error ? error.message : String(error),
-            checkedAt: now,
-          },
+          [serverId]: softenTransientOffline(
+            {
+              serverId,
+              latencyMs: null,
+              status: "offline",
+              message: error instanceof Error ? error.message : String(error),
+              checkedAt: now,
+            },
+            state.statusById[serverId],
+          ),
         },
       }));
     }

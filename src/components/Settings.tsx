@@ -121,6 +121,7 @@ export default function Settings({
   const [testing, setTesting] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingMonitor, setInstallingMonitor] = useState(false);
+  const [monitorInstallMode, setMonitorInstallMode] = useState<"install" | "reinstall">("install");
   const [monitorServers, setMonitorServers] = useState<MonitorSavedServer[]>([]);
   const [loadingMonitorServers, setLoadingMonitorServers] = useState(false);
   const [addingMonitorServerId, setAddingMonitorServerId] = useState<string | null>(null);
@@ -264,18 +265,20 @@ export default function Settings({
     }
   };
 
-  const installMonitorAgent = async () => {
+  const installMonitorAgent = async (mode: "install" | "reinstall" = "install") => {
+    setMonitorInstallMode(mode);
     setInstallingMonitor(true);
     setError("");
     setMessage("");
     try {
       await invoke<string>("install_monitor_agent");
       await loadMonitorServers();
-      setMessage("Monitor agent installed and started");
+      setMessage(mode === "reinstall" ? "Monitor agent reinstalled and restarted" : "Monitor agent installed and started");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setInstallingMonitor(false);
+      setMonitorInstallMode("install");
     }
   };
 
@@ -646,10 +649,18 @@ export default function Settings({
             <button
               className="command-button"
               disabled={!hasMonitor || installingMonitor}
-              onClick={() => void installMonitorAgent()}
+              onClick={() => void installMonitorAgent("install")}
             >
               <ServerCog size={16} className={installingMonitor ? "spin" : ""} />
-              <span>{installingMonitor ? "Installing" : "Install monitor"}</span>
+              <span>{installingMonitor && monitorInstallMode === "install" ? "Installing" : "Install monitor"}</span>
+            </button>
+            <button
+              className="command-button primary"
+              disabled={!hasMonitor || installingMonitor}
+              onClick={() => void installMonitorAgent("reinstall")}
+            >
+              <RefreshCw size={16} className={installingMonitor && monitorInstallMode === "reinstall" ? "spin" : ""} />
+              <span>{installingMonitor && monitorInstallMode === "reinstall" ? "Reinstalling" : "Reinstall monitor"}</span>
             </button>
           </div>
         </article>

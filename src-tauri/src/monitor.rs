@@ -121,11 +121,7 @@ pub async fn ping_from_monitor(
         return Ok(None);
     };
 
-    let Some(latest) = cache
-        .get(&server.id)
-        .and_then(Value::as_array)
-        .and_then(|history| history.last())
-    else {
+    let Some(history) = cache.get(&server.id).and_then(Value::as_array) else {
         return Ok(Some(ssh::PingResult {
             server_id: server.id.clone(),
             latency_ms: None,
@@ -134,6 +130,18 @@ pub async fn ping_from_monitor(
             checked_at: Utc::now(),
         }));
     };
+    let Some(latest) = stable_latest_metric(history) else {
+        return Ok(Some(ssh::PingResult {
+            server_id: server.id.clone(),
+            latency_ms: None,
+            status: "unknown".to_string(),
+            message: "No monitor sample yet".to_string(),
+            checked_at: Utc::now(),
+        }));
+    };
+
+    let latest_sample = history.last().unwrap_or(latest);
+    let is_transient_failure = !metric_is_online(latest_sample) && metric_is_online(latest);
 
     let is_online = latest
         .get("isOnline")
@@ -147,6 +155,8 @@ pub async fn ping_from_monitor(
         "offline"
     } else if ping_ms.is_some_and(|value| value > 1_000) {
         "warning"
+    } else if is_transient_failure {
+        "warning"
     } else {
         "online"
     };
@@ -155,7 +165,11 @@ pub async fn ping_from_monitor(
         server_id: server.id.clone(),
         latency_ms: ping_ms,
         status: status.to_string(),
-        message: "Monitor sample".to_string(),
+        message: if is_transient_failure {
+            "Monitor sample, last check failed once".to_string()
+        } else {
+            "Monitor sample".to_string()
+        },
         checked_at: Utc::now(),
     }))
 }
@@ -484,14 +498,36 @@ pub async fn sync_server_ssh_key(app: &AppHandle, server_id: &str) -> Result<Str
 }
 
 fn latest_metrics_from_cache(cache: &Value, server_id: &str) -> Result<ServerMetrics> {
-    let latest = cache
+    let history = cache
         .get(server_id)
         .and_then(Value::as_array)
-        .and_then(|history| history.last())
+        .with_context(|| format!("monitor has no metrics for '{server_id}' yet"))?;
+    let latest = stable_latest_metric(history)
         .with_context(|| format!("monitor has no metrics for '{server_id}' yet"))?;
 
     serde_json::from_value::<ServerMetrics>(latest.clone())
         .context("failed to decode latest monitor metrics")
+}
+
+fn stable_latest_metric(history: &[Value]) -> Option<&Value> {
+    let latest = history.last()?;
+    if metric_is_online(latest) {
+        return Some(latest);
+    }
+
+    let previous = history.iter().rev().nth(1)?;
+    if metric_is_online(previous) {
+        return Some(previous);
+    }
+
+    Some(latest)
+}
+
+fn metric_is_online(value: &Value) -> bool {
+    value
+        .get("isOnline")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 async fn prepare_agent_servers(
@@ -920,10 +956,11 @@ def main():
     config = load_json(CONFIG_PATH, {})
     cache = load_json(METRICS_PATH, {})
     events = load_json(EVENTS_PATH, [])
-    runtime = load_json(RUNTIME_PATH, {"downServers": [], "highCpuSince": {}, "highCpuAlerted": []})
+    runtime = load_json(RUNTIME_PATH, {"downServers": [], "highCpuSince": {}, "highCpuAlerted": [], "failCounts": {}})
     down = set(runtime.get("downServers") or [])
     high_since = dict(runtime.get("highCpuSince") or {})
     high_alerted = set(runtime.get("highCpuAlerted") or [])
+    fail_counts = dict(runtime.get("failCounts") or {})
     now = time.time()
 
     for server in config.get("servers") or []:
@@ -934,6 +971,7 @@ def main():
         previous = history[-1] if history else None
         try:
             point = run_metrics(config, server)
+            fail_counts.pop(server_id, None)
             if server_id in down:
                 down.remove(server_id)
             if point.get("cpuPercent", 0) > 90:
@@ -945,6 +983,10 @@ def main():
                 high_since.pop(server_id, None)
                 high_alerted.discard(server_id)
         except Exception as error:
+            fail_count = int(fail_counts.get(server_id) or 0) + 1
+            fail_counts[server_id] = fail_count
+            if fail_count < 2:
+                continue
             point = offline_point(server_id, previous)
             if server_id not in down:
                 down.add(server_id)
@@ -958,6 +1000,7 @@ def main():
         "downServers": sorted(down),
         "highCpuSince": high_since,
         "highCpuAlerted": sorted(high_alerted),
+        "failCounts": fail_counts,
     }
     save_json(METRICS_PATH, cache)
     save_json(EVENTS_PATH, events[:MAX_EVENTS])

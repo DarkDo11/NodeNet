@@ -15,6 +15,7 @@ interface MetricsState {
   pollIntervalSec: number;
   pollingServers: Set<string>;
   errorByServer: Record<string, string>;
+  offlineStrikesByServer: Record<string, number>;
   setPollInterval: (seconds: number) => void;
   setSelectedRange: (range: MetricsRange) => void;
   loadMetricsCache: () => Promise<void>;
@@ -385,6 +386,7 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
   pollIntervalSec: 10,
   pollingServers: new Set<string>(),
   errorByServer: {},
+  offlineStrikesByServer: {},
 
   setPollInterval: (seconds) =>
     set({ pollIntervalSec: Math.max(2, Math.round(seconds)) }),
@@ -430,6 +432,21 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
       const metrics = await invoke<ServerMetrics>("get_metrics", { serverId });
       const previousHistory = get().historyByServer[serverId] ?? [];
       const previousPoint = previousHistory[previousHistory.length - 1];
+      const offlineStrikes = get().offlineStrikesByServer[serverId] ?? 0;
+      if (metrics.isOnline === false && previousPoint?.isOnline && offlineStrikes < 1) {
+        set((state) => ({
+          errorByServer: {
+            ...state.errorByServer,
+            [serverId]: "",
+          },
+          offlineStrikesByServer: {
+            ...state.offlineStrikesByServer,
+            [serverId]: offlineStrikes + 1,
+          },
+          pollingServers: withoutServer(state.pollingServers, serverId),
+        }));
+        return;
+      }
       const point = buildPoint(metrics, previousPoint);
       if (previousPoint && point.timestamp <= previousPoint.timestamp) {
         return;
@@ -450,12 +467,31 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
           ...state.errorByServer,
           [serverId]: "",
         },
+        offlineStrikesByServer: {
+          ...state.offlineStrikesByServer,
+          [serverId]: metrics.isOnline === false ? offlineStrikes + 1 : 0,
+        },
         pollingServers: withoutServer(state.pollingServers, serverId),
       }));
       void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
     } catch (error) {
       const previousHistory = get().historyByServer[serverId] ?? [];
       const previousPoint = previousHistory[previousHistory.length - 1];
+      const offlineStrikes = get().offlineStrikesByServer[serverId] ?? 0;
+      if (previousPoint?.isOnline && offlineStrikes < 1) {
+        set((state) => ({
+          errorByServer: {
+            ...state.errorByServer,
+            [serverId]: "",
+          },
+          offlineStrikesByServer: {
+            ...state.offlineStrikesByServer,
+            [serverId]: offlineStrikes + 1,
+          },
+          pollingServers: withoutServer(state.pollingServers, serverId),
+        }));
+        return;
+      }
       const offlinePoint = buildOfflinePoint(serverId, previousPoint);
       if (previousPoint && offlinePoint.timestamp <= previousPoint.timestamp) {
         return;
@@ -475,6 +511,10 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
         errorByServer: {
           ...state.errorByServer,
           [serverId]: error instanceof Error ? error.message : String(error),
+        },
+        offlineStrikesByServer: {
+          ...state.offlineStrikesByServer,
+          [serverId]: offlineStrikes + 1,
         },
         pollingServers: withoutServer(state.pollingServers, serverId),
       }));
