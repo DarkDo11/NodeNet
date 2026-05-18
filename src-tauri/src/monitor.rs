@@ -11,9 +11,50 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
+    time::Instant,
 };
 use tauri::AppHandle;
+use tokio::sync::Mutex;
 use uuid::Uuid;
+
+struct CachedMonitorMetrics {
+    value: Value,
+    monitor_id: String,
+    fetched_at: Instant,
+}
+
+static MONITOR_METRICS_CACHE: OnceLock<Mutex<Option<CachedMonitorMetrics>>> = OnceLock::new();
+
+const METRICS_CACHE_TTL_SECS: u64 = 5;
+
+fn monitor_metrics_cache() -> &'static Mutex<Option<CachedMonitorMetrics>> {
+    MONITOR_METRICS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+async fn fetch_cached_monitor_metrics(app: &AppHandle, monitor: &ServerConfig) -> Result<Value> {
+    let mut guard = monitor_metrics_cache().lock().await;
+
+    if let Some(cached) = guard.as_ref() {
+        if cached.monitor_id == monitor.id
+            && cached.fetched_at.elapsed().as_secs() < METRICS_CACHE_TTL_SECS
+        {
+            return Ok(cached.value.clone());
+        }
+    }
+
+    let raw = read_remote_file(app, monitor, REMOTE_METRICS_PATH, "{}").await?;
+    let value = parse_json_value_from_output(&raw, '{', '}')
+        .unwrap_or_else(|| Value::Object(Default::default()));
+
+    *guard = Some(CachedMonitorMetrics {
+        value: value.clone(),
+        monitor_id: monitor.id.clone(),
+        fetched_at: Instant::now(),
+    });
+
+    Ok(value)
+}
 
 const MONITOR_DATA_DIR: &str = "/var/lib/nodenet-monitor";
 const MONITOR_CONFIG_DIR: &str = "/etc/nodenet-monitor";
@@ -100,9 +141,7 @@ pub async fn load_metrics_cache(app: &AppHandle) -> Result<Option<Value>> {
         return Ok(None);
     };
 
-    let raw = read_remote_file(app, &monitor, REMOTE_METRICS_PATH, "{}").await?;
-    let value = parse_json_value_from_output(&raw, '{', '}')
-        .unwrap_or_else(|| Value::Object(Default::default()));
+    let value = fetch_cached_monitor_metrics(app, &monitor).await?;
     Ok(Some(value))
 }
 
