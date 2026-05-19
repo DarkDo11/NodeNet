@@ -9,7 +9,7 @@ use crate::{
         upsert_bastion as upsert_bastion_config, upsert_server as upsert_server_config, AppConfig,
         BastionConfig, ServerConfig,
     },
-    metrics::{collect, offline, ServerMetrics},
+    metrics::{collect, ServerMetrics},
     monitor,
     ssh::{
         self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
@@ -216,7 +216,8 @@ pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetr
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
     match tokio::time::timeout(Duration::from_secs(18), collect(&app, &server)).await {
         Ok(Ok(metrics)) => Ok(metrics),
-        Ok(Err(_)) | Err(_) => Ok(offline(&server.id)),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("metrics collection timed out".to_string()),
     }
 }
 
@@ -563,35 +564,51 @@ pub async fn test_server_connection(
         three_x_ui::clear_server_cache(&server).await;
     }
 
+    let mut restore_errors: Vec<String> = Vec::new();
+
     if ssh_password.is_some() {
-        match previous_ssh_password {
+        if let Err(error) = match previous_ssh_password {
             Some(password) => save_password(&app, &server, &password).await,
             None => delete_password(&app, &server).await,
+        } {
+            restore_errors.push(format!("SSH password: {error}"));
         }
-        .map_err(|error| error.to_string())?;
     }
     if ssh_key_passphrase.is_some() {
-        match previous_key_passphrase {
+        if let Err(error) = match previous_key_passphrase {
             Some(passphrase) => save_key_passphrase(&app, &server, &passphrase).await,
             None => delete_key_passphrase(&app, &server).await,
+        } {
+            restore_errors.push(format!("SSH key passphrase: {error}"));
         }
-        .map_err(|error| error.to_string())?;
     }
     if bastion_password.is_some() {
-        match previous_bastion_password {
+        if let Err(error) = match previous_bastion_password {
             Some(password) => save_bastion_password_secret(&app, &server, &password).await,
             None => delete_bastion_password_secret(&app, &server).await,
+        } {
+            restore_errors.push(format!("bastion password: {error}"));
         }
-        .map_err(|error| error.to_string())?;
     }
     if panel_password.is_some() {
-        match previous_panel_credentials {
+        if let Err(error) = match previous_panel_credentials {
             Some((username, password)) => {
                 three_x_ui::save_credentials(&app, &server, &username, &password).await
             }
             None => three_x_ui::delete_credentials(&app, &server).await,
+        } {
+            restore_errors.push(format!("panel credentials: {error}"));
         }
-        .map_err(|error| error.to_string())?;
+    }
+
+    if !restore_errors.is_empty() {
+        let _ = app.emit(
+            "alert-error",
+            format!(
+                "credential restore failed after connection test: {}",
+                restore_errors.join("; ")
+            ),
+        );
     }
 
     result

@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{self, AppHandle, Emitter};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
     net::TcpStream,
@@ -139,6 +139,44 @@ fn bastion_keychain_account_with_id(
     } else {
         account
     })
+}
+
+pub fn start_connection_reaper() {
+    tauri::async_runtime::spawn(async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(SSH_IDLE_TIMEOUT_SECS)).await;
+            reap_stale_connections().await;
+        }
+    });
+}
+
+async fn reap_stale_connections() {
+    let stale_keys: Vec<String> = {
+        let pool = SSH_POOL.lock().await;
+        pool.iter()
+            .filter_map(|(key, conn)| {
+                conn.try_lock()
+                    .ok()
+                    .filter(|c| {
+                        c.last_used.elapsed() >= Duration::from_secs(SSH_IDLE_TIMEOUT_SECS)
+                    })
+                    .map(|_| key.clone())
+            })
+            .collect()
+    };
+
+    if stale_keys.is_empty() {
+        return;
+    }
+
+    let mut pool = SSH_POOL.lock().await;
+    for key in &stale_keys {
+        if let Some(conn) = pool.remove(key) {
+            if let Ok(conn) = conn.try_lock() {
+                let _ = fs::remove_file(&conn.control_path);
+            }
+        }
+    }
 }
 
 pub fn cleanup_stale_sockets() {

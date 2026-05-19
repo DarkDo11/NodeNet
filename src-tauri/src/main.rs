@@ -32,6 +32,8 @@ fn main() {
         })
         .setup(|app| {
             tray::build_tray(app.handle())?;
+            ssh::start_connection_reaper();
+            three_x_ui::start_panel_tunnel_reaper();
             let tray_app_handle = app.handle().clone();
             app.listen("servers-changed", move |_| {
                 let _ = tray::rebuild_tray_on_main_thread(&tray_app_handle);

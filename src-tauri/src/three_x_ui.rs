@@ -15,7 +15,7 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use tauri::AppHandle;
+use tauri::{self, AppHandle};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -875,6 +875,16 @@ fn cleanup_stale_panel_tunnels(tunnels: &mut HashMap<String, CachedPanelTunnel>)
     tunnels.retain(|_, tunnel| now.duration_since(tunnel.last_used) < PANEL_TUNNEL_TTL);
 }
 
+pub fn start_panel_tunnel_reaper() {
+    tauri::async_runtime::spawn(async {
+        loop {
+            tokio::time::sleep(PANEL_TUNNEL_TTL / 2).await;
+            let mut tunnels = PANEL_TUNNELS.lock().await;
+            cleanup_stale_panel_tunnels(&mut tunnels);
+        }
+    });
+}
+
 async fn touch_panel_tunnel(key: Option<&str>) -> bool {
     let Some(key) = key else {
         return true;
@@ -938,6 +948,13 @@ impl PanelSession {
         }
     }
 
+    async fn relogin_and_refresh(&mut self) -> Result<()> {
+        self.invalidate_cache().await;
+        self.relogin().await?;
+        self.refresh_cache().await;
+        Ok(())
+    }
+
     async fn invalidate_cache(&self) {
         if let Some(cache_key) = &self.cache_key {
             SESSION_CACHE.lock().await.remove(cache_key);
@@ -976,9 +993,7 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
-                self.invalidate_cache().await;
-                self.relogin().await?;
-                self.refresh_cache().await;
+                self.relogin_and_refresh().await?;
                 continue;
             }
 
@@ -993,9 +1008,7 @@ impl PanelSession {
             let envelope = parse_envelope::<Value>(&text)?;
             if envelope.success == Some(false) {
                 if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
-                    self.invalidate_cache().await;
-                    self.relogin().await?;
-                    self.refresh_cache().await;
+                    self.relogin_and_refresh().await?;
                     continue;
                 }
                 bail!(
@@ -1019,9 +1032,7 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
-                self.invalidate_cache().await;
-                self.relogin().await?;
-                self.refresh_cache().await;
+                self.relogin_and_refresh().await?;
                 continue;
             }
 
@@ -1036,9 +1047,7 @@ impl PanelSession {
             let envelope = parse_envelope::<Value>(&text)?;
             if envelope.success == Some(false) {
                 if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
-                    self.invalidate_cache().await;
-                    self.relogin().await?;
-                    self.refresh_cache().await;
+                    self.relogin_and_refresh().await?;
                     continue;
                 }
                 bail!(
@@ -1068,9 +1077,7 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
-                self.invalidate_cache().await;
-                self.relogin().await?;
-                self.refresh_cache().await;
+                self.relogin_and_refresh().await?;
                 continue;
             }
 
@@ -1081,9 +1088,7 @@ impl PanelSession {
             let envelope = parse_envelope::<T>(&text)?;
             if envelope.success == Some(false) {
                 if should_retry_login(envelope.msg.as_deref()) && attempt == 0 {
-                    self.invalidate_cache().await;
-                    self.relogin().await?;
-                    self.refresh_cache().await;
+                    self.relogin_and_refresh().await?;
                     continue;
                 }
                 bail!(
@@ -1115,9 +1120,7 @@ impl PanelSession {
             let text = response.text().await.unwrap_or_default();
 
             if needs_relogin(status, &text) && attempt == 0 {
-                self.invalidate_cache().await;
-                self.relogin().await?;
-                self.refresh_cache().await;
+                self.relogin_and_refresh().await?;
                 continue;
             }
 
@@ -1134,9 +1137,7 @@ impl PanelSession {
                         .and_then(Value::as_str)
                         .unwrap_or("unknown error");
                     if should_retry_login(Some(message)) && attempt == 0 {
-                        self.invalidate_cache().await;
-                        self.relogin().await?;
-                        self.refresh_cache().await;
+                        self.relogin_and_refresh().await?;
                         continue;
                     }
                     bail!("3x-ui request failed: {message}");

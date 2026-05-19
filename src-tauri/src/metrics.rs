@@ -145,29 +145,6 @@ pub async fn collect(app: &AppHandle, server: &ServerConfig) -> Result<ServerMet
     Ok(metrics)
 }
 
-pub fn offline(server_id: &str) -> ServerMetrics {
-    ServerMetrics {
-        server_id: server_id.to_string(),
-        timestamp: Utc::now(),
-        cpu_percent: 0.0,
-        ram_used_mb: 0,
-        ram_total_mb: 0,
-        ram_percent: 0.0,
-        disk_used: "--".to_string(),
-        disk_total: "--".to_string(),
-        disk_percent: 0.0,
-        load_average: [0.0, 0.0, 0.0],
-        uptime_sec: 0,
-        uptime: "Offline".to_string(),
-        rx_bytes: 0,
-        tx_bytes: 0,
-        total_rx_bytes: 0,
-        total_tx_bytes: 0,
-        total_traffic_bytes: 0,
-        ping_ms: None,
-        is_online: false,
-    }
-}
 
 fn parse_metrics(server_id: &str, output: &str) -> Result<ServerMetrics> {
     let mut values = HashMap::new();

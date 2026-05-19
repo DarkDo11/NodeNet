@@ -121,9 +121,11 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 
     let path = config_path()?;
     let raw = serde_json::to_string_pretty(config).context("failed to serialize config")?;
-    fs::write(&path, raw).with_context(|| format!("failed to write config {}", path.display()))?;
-
-    Ok(())
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &raw)
+        .with_context(|| format!("failed to write config {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("failed to commit config {}", path.display()))
 }
 
 pub fn upsert_server(mut server: ServerConfig) -> Result<AppConfig> {

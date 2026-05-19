@@ -11,7 +11,7 @@ use russh::keys::{key::PrivateKeyWithHashAlg, load_secret_key};
 use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
@@ -238,6 +238,13 @@ async fn run_terminal_worker(
 
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(8));
     }
+
+    // Remove the session entry when the worker exits so callers don't see a stale sender.
+    app.state::<TerminalState>()
+        .sessions
+        .lock()
+        .await
+        .remove(&session_id);
 }
 
 struct LiveTerminal {

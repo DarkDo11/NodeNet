@@ -19,7 +19,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const POLL_INTERVAL_MIN_SECS: u64 = 10;
+const POLL_INTERVAL_MIN_SECS: u64 = 30;
 const POLL_INTERVAL_DEFAULT_SECS: u64 = 30;
 const MAX_EVENTS: usize = 500;
 const EVENTS_APP_DIR: &str = "NodeNet";
