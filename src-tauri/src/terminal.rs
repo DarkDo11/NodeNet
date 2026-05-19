@@ -572,7 +572,14 @@ fn verify_known_host(
             return Ok(());
         }
 
-        return Err(russh::Error::KeyChanged { line: 0 });
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "SSH host key for '{host_key}' has changed. \
+                If the server was reinstalled, remove it from Settings → Known Hosts."
+            ),
+        )
+        .into());
     }
 
     known_hosts.0.insert(host_key.to_string(), fingerprint);

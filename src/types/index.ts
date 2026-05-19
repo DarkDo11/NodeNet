@@ -72,7 +72,9 @@ export interface ServerMetrics {
   loadAverage: [number, number, number];
   uptimeSec: number;
   uptime: string;
+  /** Cumulative received bytes since boot (same as totalRxBytes). */
   rxBytes: number;
+  /** Cumulative transmitted bytes since boot (same as totalTxBytes). */
   txBytes: number;
   totalRxBytes?: number;
   totalTxBytes?: number;
@@ -109,7 +111,9 @@ export interface MetricPoint {
   loadAverage: [number, number, number];
   uptimeSec: number;
   uptime: string;
+  /** @deprecated Alias for totalRxBytes. Cumulative counter, not a per-interval delta. */
   rxBytes: number;
+  /** @deprecated Alias for totalTxBytes. Cumulative counter, not a per-interval delta. */
   txBytes: number;
 }
 

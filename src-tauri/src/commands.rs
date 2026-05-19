@@ -747,6 +747,7 @@ pub async fn get_panel_setup_info_command(
         .map_err(|error| error.to_string())?;
 
     let mut config = load_config().map_err(|error| error.to_string())?;
+    let mut config_changed = false;
     if let Some(existing) = config
         .servers
         .iter_mut()
@@ -759,8 +760,11 @@ pub async fn get_panel_setup_info_command(
         ));
         existing.panel_user = Some(info.username.clone());
         server = existing.clone();
+        config_changed = true;
     }
-    save_config(&config).map_err(|error| error.to_string())?;
+    if config_changed {
+        save_config(&config).map_err(|error| error.to_string())?;
+    }
     if !info.password.is_empty() {
         three_x_ui::save_credentials(&app, &server, &info.username, &info.password)
             .await

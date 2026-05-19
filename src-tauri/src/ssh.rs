@@ -334,7 +334,8 @@ pub async fn open_bastion_tunnel(
     let host = bastion_host(server).context("bastion host is not configured")?;
     let user = bastion_user(server);
     let port = server.bastion_port.unwrap_or(22);
-    let local_port = reserve_local_port().context("Bastion tunnel failed: no local port")?;
+    let (local_port, port_guard) =
+        reserve_local_port().context("Bastion tunnel failed: no local port")?;
     let bastion_secret = read_bastion_password(app, server).await?;
     let askpass = create_askpass_script(None, bastion_secret.as_deref(), server)
         .context("Bastion tunnel failed: could not prepare SSH authentication")?;
@@ -386,6 +387,9 @@ pub async fn open_bastion_tunnel(
 
     command.arg(format!("{user}@{host}"));
 
+    // Release the reserved port so SSH can bind to it; the window between
+    // drop and spawn is microseconds — far shorter than before the fix.
+    drop(port_guard);
     let mut child = command
         .spawn()
         .context("Bastion tunnel failed: could not start ssh")?;
@@ -395,10 +399,11 @@ pub async fn open_bastion_tunnel(
     Ok(SshTunnel { child, local_port })
 }
 
-fn reserve_local_port() -> Result<u16> {
+fn reserve_local_port() -> Result<(u16, TcpListener)> {
     let listener =
         TcpListener::bind(("127.0.0.1", 0)).context("failed to bind local tunnel port")?;
-    Ok(listener.local_addr()?.port())
+    let port = listener.local_addr()?.port();
+    Ok((port, listener))
 }
 
 async fn wait_for_tunnel(child: &mut Child, local_port: u16) -> Result<()> {

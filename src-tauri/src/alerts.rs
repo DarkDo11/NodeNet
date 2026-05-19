@@ -19,7 +19,8 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const POLL_INTERVAL_MIN_SECS: u64 = 10;
+const POLL_INTERVAL_DEFAULT_SECS: u64 = 30;
 const MAX_EVENTS: usize = 500;
 const EVENTS_APP_DIR: &str = "NodeNet";
 const EVENTS_KEYCHAIN_SERVICE: &str = "nodenet.events";
@@ -100,7 +101,10 @@ pub fn start_alert_poller(app: AppHandle) {
             if let Err(error) = poll_once(&app).await {
                 let _ = app.emit("alert-error", format!("alert poller failed: {error}"));
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            let interval_secs = load_config()
+                .map(|config| config.poll_interval_sec.max(POLL_INTERVAL_MIN_SECS))
+                .unwrap_or(POLL_INTERVAL_DEFAULT_SECS);
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         }
     });
 }

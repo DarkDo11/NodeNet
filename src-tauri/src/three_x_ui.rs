@@ -273,7 +273,7 @@ async fn save_xray_config_via_ssh(
     upload_result?;
 
     let command = format!(
-        "cd /usr/local/x-ui && ./bin/xray-linux-amd64 -test -config {} >/dev/null && python3 -c {} {} && rm -f {} && (systemctl restart x-ui || systemctl restart 3x-ui || systemctl restart xray)",
+        "ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/armv7l/arm32/') && cd /usr/local/x-ui && ./bin/xray-linux-$ARCH -test -config {} >/dev/null && python3 -c {} {} && rm -f {} && (systemctl restart x-ui || systemctl restart 3x-ui || systemctl restart xray)",
         shell_single_quote(&remote_path),
         shell_single_quote(
             "import sqlite3,sys; value=open(sys.argv[1],encoding='utf-8').read(); db=sqlite3.connect('/etc/x-ui/x-ui.db'); db.execute('delete from settings where key=?', ('xrayTemplateConfig',)); db.execute('insert into settings(key,value) values(?,?)', ('xrayTemplateConfig', value)); db.commit(); db.close()"

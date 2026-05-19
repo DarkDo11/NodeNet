@@ -28,6 +28,7 @@ interface MetricsState {
 }
 
 const DAY_MS = 86_400_000;
+const MAX_HISTORY_MS = 5 * 365 * DAY_MS;
 const RANGE_MS: Record<Exclude<MetricsRange, "all">, number> = {
   "1d": DAY_MS,
   "1w": 7 * DAY_MS,
@@ -306,7 +307,10 @@ const applyRetention = (history: MetricPoint[]) => {
     60 * 60_000,
   );
   const daily = aggregatePoints(
-    history.filter((point) => now - point.timestamp > 365 * DAY_MS),
+    history.filter((point) => {
+      const age = now - point.timestamp;
+      return age > 365 * DAY_MS && age <= MAX_HISTORY_MS;
+    }),
     DAY_MS,
   );
 
@@ -443,7 +447,6 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
             ...state.offlineStrikesByServer,
             [serverId]: offlineStrikes + 1,
           },
-          pollingServers: withoutServer(state.pollingServers, serverId),
         }));
         return;
       }
@@ -471,7 +474,6 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
           ...state.offlineStrikesByServer,
           [serverId]: metrics.isOnline === false ? offlineStrikes + 1 : 0,
         },
-        pollingServers: withoutServer(state.pollingServers, serverId),
       }));
       void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
     } catch (error) {
@@ -488,7 +490,6 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
             ...state.offlineStrikesByServer,
             [serverId]: offlineStrikes + 1,
           },
-          pollingServers: withoutServer(state.pollingServers, serverId),
         }));
         return;
       }
@@ -516,10 +517,10 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
           ...state.offlineStrikesByServer,
           [serverId]: offlineStrikes + 1,
         },
-        pollingServers: withoutServer(state.pollingServers, serverId),
       }));
       void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
     } finally {
+      // Single cleanup point: handles all return paths including stale-timestamp early returns.
       set((state) => ({
         pollingServers: withoutServer(state.pollingServers, serverId),
       }));

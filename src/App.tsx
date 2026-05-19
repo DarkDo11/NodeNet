@@ -188,52 +188,63 @@ export default function App() {
   }, [selectedServer]);
 
   useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
     void loadEvents();
-    let cleanup: (() => void) | null = null;
-    void attachAlertListeners().then((unlisten) => {
-      cleanup = unlisten;
+    void attachAlertListeners().then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     });
 
-    const timer = window.setInterval(() => {
-      void loadEvents();
-    }, Math.max(10, pollIntervalSec) * 1000);
+    const timer = window.setInterval(() => void loadEvents(), Math.max(10, pollIntervalSec) * 1000);
 
     return () => {
+      cancelled = true;
       window.clearInterval(timer);
-      cleanup?.();
+      unlisten?.();
     };
   }, [attachAlertListeners, loadEvents, pollIntervalSec]);
 
   useEffect(() => {
+    if (monitorServerId || monitorBastionId) void loadMetricsCache();
+  }, [monitorServerId, monitorBastionId, loadMetricsCache]);
+
+  useEffect(() => {
     if (!monitorServerId && !monitorBastionId) return;
-
-    void loadMetricsCache();
-    const timer = window.setInterval(() => {
-      void loadMetricsCache();
-    }, Math.max(10, pollIntervalSec) * 1000);
-
+    const timer = window.setInterval(
+      () => void loadMetricsCache(),
+      Math.max(10, pollIntervalSec) * 1000,
+    );
     return () => window.clearInterval(timer);
   }, [loadMetricsCache, monitorBastionId, monitorServerId, pollIntervalSec]);
 
   useEffect(() => {
+    if (servers.length > 0) void pingAllServers();
+  }, [servers.length, pingAllServers]);
+
+  useEffect(() => {
     if (servers.length === 0) return;
-
-    void pingAllServers();
-    const timer = window.setInterval(() => {
-      void pingAllServers();
-    }, Math.max(2, pollIntervalSec) * 1000);
-
+    const timer = window.setInterval(
+      () => void pingAllServers(),
+      Math.max(2, pollIntervalSec) * 1000,
+    );
     return () => window.clearInterval(timer);
   }, [pingAllServers, pollIntervalSec, servers.length]);
 
   useEffect(() => {
+    if (selectedServerId) void fetchMetrics(selectedServerId);
+  }, [selectedServerId, fetchMetrics]);
+
+  useEffect(() => {
     if (!selectedServerId) return;
-
-    void fetchMetrics(selectedServerId);
-    const timer = window.setInterval(() => {
-      void fetchMetrics(selectedServerId);
-    }, Math.max(2, pollIntervalSec) * 1000);
-
+    const timer = window.setInterval(
+      () => void fetchMetrics(selectedServerId),
+      Math.max(2, pollIntervalSec) * 1000,
+    );
     return () => window.clearInterval(timer);
   }, [fetchMetrics, pollIntervalSec, selectedServerId]);
 
@@ -250,13 +261,15 @@ export default function App() {
   }, [activeView, loadXrayConfig, selectedServer?.panelUrl, selectedServerId]);
 
   useEffect(() => {
+    if (servers.length > 0) void refreshGlobalStats(servers);
+  }, [servers, refreshGlobalStats]);
+
+  useEffect(() => {
     if (servers.length === 0) return;
-
-    void refreshGlobalStats(servers);
-    const timer = window.setInterval(() => {
-      void refreshGlobalStats(servers);
-    }, Math.max(10, pollIntervalSec) * 1000);
-
+    const timer = window.setInterval(
+      () => void refreshGlobalStats(servers),
+      Math.max(10, pollIntervalSec) * 1000,
+    );
     return () => window.clearInterval(timer);
   }, [pollIntervalSec, refreshGlobalStats, servers]);
 

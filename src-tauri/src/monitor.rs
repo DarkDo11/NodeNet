@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::{
     collections::HashSet,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::OnceLock,
     time::Instant,
 };
@@ -1176,9 +1176,4 @@ if __name__ == "__main__":
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-#[allow(dead_code)]
-fn _temp_file_path(directory: &Path, name: &str) -> PathBuf {
-    directory.join(name)
 }
