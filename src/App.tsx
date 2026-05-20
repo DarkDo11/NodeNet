@@ -268,7 +268,7 @@ export default function App() {
     if (servers.length === 0) return;
     const timer = window.setInterval(
       () => void refreshGlobalStats(servers),
-      Math.max(10, pollIntervalSec) * 1000,
+      Math.max(30, pollIntervalSec) * 1000,
     );
     return () => window.clearInterval(timer);
   }, [pollIntervalSec, refreshGlobalStats, servers]);
@@ -293,8 +293,6 @@ export default function App() {
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       if (!shouldStartWindowDrag(event)) return;
-
-      event.preventDefault();
       void getCurrentWindow().startDragging();
     };
 

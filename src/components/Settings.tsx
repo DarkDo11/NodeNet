@@ -917,6 +917,14 @@ export default function Settings({
               <RefreshCw size={16} />
               <span>Detect 3x-ui</span>
             </button>
+            <button
+              className="command-button"
+              disabled={!selectedServer}
+              onClick={() => setSetupServerId(setupServerId ? null : (selectedServer?.id ?? null))}
+            >
+              <ServerCog size={16} />
+              <span>{setupServerId ? "Close Setup" : "Setup"}</span>
+            </button>
             <button className="command-button danger" disabled={!selectedServer} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={16} />
               <span>Delete server</span>
