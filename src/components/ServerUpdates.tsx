@@ -11,7 +11,10 @@ interface ServerVersions {
 }
 
 const VERSION_CHECK_CMD =
-  `echo "xui:$(x-ui version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1 || echo 'n/a')"; echo "xray:$(xray version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1 || echo 'n/a')"`;
+  'export PATH="/usr/local/bin:/usr/local/x-ui:/usr/bin:/bin:$PATH"; ' +
+  'u=$(x-ui version 2>/dev/null); u=$(echo "$u" | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1); ' +
+  'r=$(xray version 2>/dev/null); [ -z "$r" ] && r=$(/usr/local/x-ui/xray version 2>/dev/null); r=$(echo "$r" | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1); ' +
+  'echo "xui:${u:-n/a}"; echo "xray:${r:-n/a}"';
 
 const UPDATE_CMD =
   `printf 'y\\n\\n\\n\\n\\n\\n' | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) && echo "--- Restarting x-ui ---" && (systemctl restart x-ui 2>/dev/null || x-ui restart 2>/dev/null || true) && echo "--- Done ---"`;
