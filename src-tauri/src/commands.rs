@@ -228,7 +228,9 @@ pub async fn ping_server(app: AppHandle, server_id: String) -> Result<PingResult
         .await
         .map_err(|error| error.to_string())?
     {
-        return Ok(result);
+        if result.status != "unknown" {
+            return Ok(result);
+        }
     }
 
     Ok(ping(&app, &server).await)
