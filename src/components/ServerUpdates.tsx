@@ -14,9 +14,8 @@ const VERSION_CHECK_CMD =
   'u=""; r=""; ' +
   '[ -f /usr/local/x-ui/x-ui ] && u=$(/usr/local/x-ui/x-ui -v 2>&1); ' +
   'u=$(echo "$u" | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1); ' +
-  'for p in /usr/local/x-ui/xray /usr/local/x-ui/bin/xray /usr/bin/xray /usr/local/bin/xray; do if [ -f "$p" ]; then r=$("$p" version 2>&1); break; fi; done; ' +
-  '[ -z "$r" ] && r=$(xray version 2>&1); ' +
-  'r=$(echo "$r" | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1); ' +
+  'r=$(go version -m /usr/local/x-ui/x-ui 2>/dev/null | awk \'/xray-core/{print $3}\' | tr -d \'v\'); ' +
+  '[ -z "$r" ] && r=$(grep -a "$(printf \'dep\\tgithub.com/xtls/xray-core\\t\')" /usr/local/x-ui/x-ui 2>/dev/null | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1); ' +
   'echo "xui:${u:-n/a}"; echo "xray:${r:-n/a}"';
 
 const UPDATE_CMD =
