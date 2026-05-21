@@ -17,6 +17,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import ConfirmModal from "./ConfirmModal";
 import CountryFlag from "./CountryFlag";
+import ServerUpdates from "./ServerUpdates";
 import SetupPresets from "./SetupPresets";
 import type {
   AppTheme,
@@ -112,7 +113,6 @@ export default function Settings({
   const [bastionPresetName, setBastionPresetName] = useState("");
   const [syncMonitorKey, setSyncMonitorKey] = useState(true);
   const [panelPassword, setPanelPassword] = useState("");
-  const [setupServerId, setSetupServerId] = useState<string | null>(null);
   const [configPath, setConfigPath] = useState("");
   const [appVersion, setAppVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState("");
@@ -132,10 +132,6 @@ export default function Settings({
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
     [selectedServerId, servers],
-  );
-  const setupServer = useMemo(
-    () => servers.find((server) => server.id === setupServerId) ?? null,
-    [setupServerId, servers],
   );
   const monitorTargetValue = monitorServerId
     ? `server:${monitorServerId}`
@@ -425,9 +421,6 @@ export default function Settings({
       setIsCreatingServer(false);
       setSelectedServerId(server.id);
       setMessage("Server saved");
-      if (wasNew) {
-        setSetupServerId(server.id);
-      }
       if (wasNew && hasMonitor && syncMonitorKey && server.sshKeyPath) {
         try {
           await invoke<string>("sync_monitor_ssh_key", { serverId: server.id });
@@ -484,13 +477,13 @@ export default function Settings({
   };
 
   const panelInfoSaved = (info: PanelSetupInfo) => {
-    const host = setupServer?.host ?? form.host;
+    const host = selectedServer?.host ?? form.host;
     const basePath = normalizePanelBasePath(info.webBasePath);
     const panelUrl = `http://${host}:${info.port}${basePath}`;
     updateForm("panelUrl", panelUrl);
     updateForm("panelUser", info.username);
-    if (setupServer) {
-      void onSaveServer({ ...setupServer, panelUrl, panelUser: info.username });
+    if (selectedServer) {
+      void onSaveServer({ ...selectedServer, panelUrl, panelUser: info.username });
     }
   };
 
@@ -588,7 +581,6 @@ export default function Settings({
             setPanelPassword("");
             setMessage("");
             setError("");
-            setSetupServerId(null);
           }}
         >
           <Plus size={16} />
@@ -686,6 +678,8 @@ export default function Settings({
             </button>
           </div>
         </article>
+
+        <ServerUpdates servers={servers} />
 
         <article className="settings-panel wide">
           <div className="settings-panel-header split">
@@ -917,14 +911,6 @@ export default function Settings({
               <RefreshCw size={16} />
               <span>Detect 3x-ui</span>
             </button>
-            <button
-              className="command-button"
-              disabled={!selectedServer}
-              onClick={() => setSetupServerId(setupServerId ? null : (selectedServer?.id ?? null))}
-            >
-              <ServerCog size={16} />
-              <span>{setupServerId ? "Close Setup" : "Setup"}</span>
-            </button>
             <button className="command-button danger" disabled={!selectedServer} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={16} />
               <span>Delete server</span>
@@ -932,12 +918,11 @@ export default function Settings({
           </div>
         </article>
 
-        {setupServer ? (
+        {selectedServer ? (
           <SetupPresets
-            server={setupServer}
+            server={selectedServer}
             onPanelInfoSaved={panelInfoSaved}
             onServerUpdated={onSaveServer}
-            onDone={() => setSetupServerId(null)}
           />
         ) : null}
 
