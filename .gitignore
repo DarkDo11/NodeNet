@@ -8,3 +8,4 @@ src-tauri/gen
 src-tauri/Cargo.lock
 
 .DS_Store
+.claude
