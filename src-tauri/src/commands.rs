@@ -786,6 +786,11 @@ pub async fn get_panel_setup_info_command(
         three_x_ui::save_credentials(&app, &server, &info.username, &info.password)
             .await
             .map_err(|error| error.to_string())?;
+    } else {
+        // Plaintext password not found (newer 3x-ui stores only bcrypt in users table).
+        // Clear any stale/hashed credentials so the user gets a clean prompt to enter manually.
+        let _ = three_x_ui::delete_credentials(&app, &server).await;
+        three_x_ui::clear_server_cache(&server).await;
     }
     let _ = app.emit("servers-changed", ());
 
@@ -1104,12 +1109,14 @@ async fn read_xui_sqlite_user_password(
     app: &AppHandle,
     server: &ServerConfig,
 ) -> anyhow::Result<Option<String>> {
-    read_xui_sqlite_value(
+    let value = read_xui_sqlite_value(
         app,
         server,
         "sqlite3 /etc/x-ui/x-ui.db \"SELECT password FROM users ORDER BY id LIMIT 1;\" 2>/dev/null || true",
     )
-    .await
+    .await?;
+    // Newer 3x-ui stores a bcrypt hash here — skip it, it can't be used as a login password.
+    Ok(value.filter(|v| !v.starts_with("$2")))
 }
 
 async fn read_xui_sqlite_value(
