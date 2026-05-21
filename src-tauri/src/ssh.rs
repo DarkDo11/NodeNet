@@ -660,7 +660,9 @@ async fn execute_streaming_once(
         .await
         .context("ssh stderr stream task failed")??;
 
-    if !status.success() {
+    // Exit 255 means SSH itself failed (connection lost/refused), not the remote command.
+    // For streaming commands the output was already shown live; only surface SSH-level errors.
+    if status.code() == Some(255) {
         bail!("ssh command failed with status {status}");
     }
 
