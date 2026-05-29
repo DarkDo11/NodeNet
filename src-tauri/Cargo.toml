@@ -29,3 +29,6 @@ base64 = "0.22"
 aes-gcm = "0.10"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[patch.crates-io]
+dispatch2 = { path = "patches/dispatch2" }
