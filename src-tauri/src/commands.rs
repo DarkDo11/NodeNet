@@ -22,6 +22,7 @@ use crate::{
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -1000,32 +1001,51 @@ fn public_key_path_for_private(private_key_path: &Path) -> PathBuf {
 
 #[tauri::command]
 pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
-    if let Some(cache) = monitor::load_metrics_cache(&app)
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(cache);
+    // Always read the local cache first — it is the persisted baseline from
+    // the previous session (written by save_metrics_cache).
+    let path = crate::config::config_dir()
+        .map_err(|e| e.to_string())?
+        .join("metrics-cache.json");
+    let local_cache: Value = if path.exists() {
+        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()))
+    } else {
+        Value::Object(Default::default())
+    };
+
+    let monitor_enabled = crate::config::load_config()
+        .map(|cfg| monitor::is_enabled(&cfg))
+        .unwrap_or(false);
+
+    if !monitor_enabled {
+        return Ok(local_cache);
     }
 
-    let path = crate::config::config_dir()
-        .map_err(|error| error.to_string())?
-        .join("metrics-cache.json");
-    if !path.exists() {
-        return Ok(Value::Object(Default::default()));
+    let has_local_data = local_cache.as_object().is_some_and(|o| !o.is_empty());
+
+    if has_local_data {
+        // Delta load: only download points newer than what we already have.
+        let since = latest_timestamps(&local_cache);
+        if let Ok(delta) = monitor::fetch_metrics_delta(&app, &since).await {
+            let mut merged = local_cache;
+            merge_cache_delta(&mut merged, delta);
+            return Ok(merged);
+        }
+        // Monitor unreachable — return the local cache so the UI isn't blank.
+        return Ok(local_cache);
     }
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&raw).map_err(|error| error.to_string())
+
+    // No local cache yet: download the full history from the monitor.
+    if let Ok(Some(full)) = monitor::load_metrics_cache(&app).await {
+        return Ok(full);
+    }
+    Ok(Value::Object(Default::default()))
 }
 
 #[tauri::command]
 pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
-    if crate::config::load_config()
-        .map(|config| monitor::is_enabled(&config))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
+    // Always persist locally — even in monitor mode — so the next startup can
+    // do incremental delta loading instead of downloading the full history.
     let directory = crate::config::config_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join("metrics-cache.json");
@@ -1206,6 +1226,49 @@ fn first_u16(line: &str) -> Option<u16> {
     line.split(|character: char| !character.is_ascii_digit())
         .filter(|value| !value.is_empty())
         .find_map(|value| value.parse::<u16>().ok())
+}
+
+/// Extract the latest timestamp (epoch ms) for each server from a cached
+/// metrics JSON object `{ serverId: [ { timestamp, ... }, ... ] }`.
+fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
+    let mut since = HashMap::new();
+    let Some(obj) = cache.as_object() else { return since };
+    for (server_id, history) in obj {
+        let Some(arr) = history.as_array() else { continue };
+        let latest_ms = arr
+            .iter()
+            .filter_map(|point| {
+                point
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                    .map(|dt| dt.timestamp_millis())
+            })
+            .max()
+            .unwrap_or(0);
+        since.insert(server_id.clone(), latest_ms);
+    }
+    since
+}
+
+/// Append new points from `delta` into `base`.  Points are appended without
+/// deduplication — the frontend's normalizeHistory sorts and deduplicates.
+fn merge_cache_delta(base: &mut Value, delta: Value) {
+    let (Some(base_obj), Some(delta_obj)) = (base.as_object_mut(), delta.as_object()) else {
+        return;
+    };
+    for (server_id, new_points) in delta_obj {
+        let Some(new_arr) = new_points.as_array() else { continue };
+        if new_arr.is_empty() {
+            continue;
+        }
+        let entry = base_obj
+            .entry(server_id.clone())
+            .or_insert_with(|| Value::Array(vec![]));
+        if let Some(existing) = entry.as_array_mut() {
+            existing.extend(new_arr.iter().cloned());
+        }
+    }
 }
 
 fn expand_public_key_path(path: &str) -> Result<PathBuf, String> {

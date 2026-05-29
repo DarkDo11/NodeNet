@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::OnceLock,
@@ -1176,4 +1176,61 @@ if __name__ == "__main__":
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Fetch only metric points that are newer than the timestamps in `since`.
+/// `since` maps server IDs to the last known timestamp in milliseconds.
+/// Returns a JSON object with the same shape as the full metrics cache,
+/// containing only the new points for each server.
+pub async fn fetch_metrics_delta(
+    app: &AppHandle,
+    since: &HashMap<String, i64>,
+) -> Result<Value> {
+    let config = load_config()?;
+    let Some(monitor) = monitor_server(&config)? else {
+        return Ok(Value::Object(Default::default()));
+    };
+    let since_json = serde_json::to_string(since)?;
+    let command = delta_command(&since_json);
+    let raw = ssh::execute(app, &monitor, &command).await?;
+    Ok(parse_json_value_from_output(&raw, '{', '}')
+        .unwrap_or_else(|| Value::Object(Default::default())))
+}
+
+fn delta_command(since_json: &str) -> String {
+    // Python script uses only double-quoted strings so it is safe inside the
+    // heredoc (no delimiter conflict) and the SINCE dict literal (JSON with
+    // integer values and double-quoted string keys) is valid Python syntax.
+    format!(
+        r#"python3 - <<'_NN_DELTA_'
+import json
+from datetime import datetime, timezone
+
+def parse_ms(ts):
+    try:
+        s = (str(ts)[:-1] + "+00:00") if str(ts).endswith("Z") else str(ts)
+        return int(datetime.fromisoformat(s).timestamp() * 1000)
+    except Exception:
+        return 0
+
+SINCE = {since}
+try:
+    with open("/var/lib/nodenet-monitor/metrics-cache.json", "r", encoding="utf-8") as fh:
+        cache = json.load(fh)
+except Exception:
+    cache = {{}}
+
+result = {{}}
+for sid, pts in (cache if isinstance(cache, dict) else {{}}).items():
+    cutoff = int(SINCE.get(sid, 0))
+    result[sid] = [
+        p for p in (pts if isinstance(pts, list) else [])
+        if isinstance(p, dict) and parse_ms(p.get("timestamp") or "") > cutoff
+    ]
+
+import sys
+sys.stdout.write(json.dumps(result, ensure_ascii=False))
+_NN_DELTA_"#,
+        since = since_json
+    )
 }
