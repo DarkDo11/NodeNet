@@ -1230,6 +1230,9 @@ fn first_u16(line: &str) -> Option<u16> {
 
 /// Extract the latest timestamp (epoch ms) for each server from a cached
 /// metrics JSON object `{ serverId: [ { timestamp, ... }, ... ] }`.
+///
+/// Handles both ISO-8601 string timestamps (monitor format) and numeric
+/// epoch-ms timestamps (frontend MetricPoint format saved to local disk).
 fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
     let mut since = HashMap::new();
     let Some(obj) = cache.as_object() else { return since };
@@ -1238,10 +1241,13 @@ fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
         let latest_ms = arr
             .iter()
             .filter_map(|point| {
-                point
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                let ts = point.get("timestamp")?;
+                if let Some(n) = ts.as_i64() {
+                    // Epoch seconds (< 10^10) vs epoch milliseconds.
+                    return Some(if n < 10_000_000_000 { n * 1000 } else { n });
+                }
+                ts.as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.timestamp_millis())
             })
             .max()
@@ -1251,8 +1257,8 @@ fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
     since
 }
 
-/// Append new points from `delta` into `base`.  Points are appended without
-/// deduplication — the frontend's normalizeHistory sorts and deduplicates.
+/// Append new points from `delta` into `base`.  Duplicate-free by design:
+/// `fetch_metrics_delta` uses a strict `>` cutoff so delta never overlaps base.
 fn merge_cache_delta(base: &mut Value, delta: Value) {
     let (Some(base_obj), Some(delta_obj)) = (base.as_object_mut(), delta.as_object()) else {
         return;
