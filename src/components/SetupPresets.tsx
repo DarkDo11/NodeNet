@@ -18,13 +18,13 @@ interface SshKeyPair {
 
 type PresetId =
   | "install3xui"
+  | "sshKey"
   | "ipReputation"
   | "bbr"
   | "benchmark"
   | "region"
   | "hardenSsh"
-  | "ufw"
-  | "sshKey";
+  | "ufw";
 
 interface PresetItem {
   id: PresetId;
@@ -36,6 +36,13 @@ interface PresetItem {
 }
 
 const presets: PresetItem[] = [
+  {
+    id: "sshKey",
+    name: "Copy SSH public key",
+    description: "Adds a selected ~/.ssh public key to authorized_keys on the server.",
+    command: "",
+    recommended: true,
+  },
   {
     id: "install3xui",
     name: "Install 3x-ui panel",
@@ -79,9 +86,9 @@ const presets: PresetItem[] = [
   {
     id: "hardenSsh",
     name: "Harden SSH",
-    description: "Disables password auth, enables public key auth, and restarts SSH.",
+    description: "Requires an authorized key, disables password auth, and restarts SSH.",
     command:
-      "for file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do [ -f \"$file\" ] || continue; sed -i -E 's/^[#[:space:]]*PasswordAuthentication[[:space:]]+.*/PasswordAuthentication no/' \"$file\"; sed -i -E 's/^[#[:space:]]*PubkeyAuthentication[[:space:]]+.*/PubkeyAuthentication yes/' \"$file\"; sed -i -E 's/^[#[:space:]]*KbdInteractiveAuthentication[[:space:]]+.*/KbdInteractiveAuthentication no/' \"$file\"; done; printf 'PasswordAuthentication no\\nPubkeyAuthentication yes\\nKbdInteractiveAuthentication no\\n' > /etc/ssh/sshd_config.d/99-nodenet-hardening.conf && sshd -t && systemctl restart ssh",
+      "test -s ~/.ssh/authorized_keys || { echo 'No SSH public key found in ~/.ssh/authorized_keys. Run Copy SSH public key first.' >&2; exit 1; }; for file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do [ -f \"$file\" ] || continue; sed -i -E 's/^[#[:space:]]*PasswordAuthentication[[:space:]]+.*/PasswordAuthentication no/' \"$file\"; sed -i -E 's/^[#[:space:]]*PubkeyAuthentication[[:space:]]+.*/PubkeyAuthentication yes/' \"$file\"; sed -i -E 's/^[#[:space:]]*KbdInteractiveAuthentication[[:space:]]+.*/KbdInteractiveAuthentication no/' \"$file\"; done; printf 'PasswordAuthentication no\\nPubkeyAuthentication yes\\nKbdInteractiveAuthentication no\\n' > /etc/ssh/sshd_config.d/99-nodenet-hardening.conf && sshd -t && (systemctl restart ssh || systemctl restart sshd)",
     recommended: true,
   },
   {
@@ -91,13 +98,6 @@ const presets: PresetItem[] = [
     command: "",
     recommended: true,
     outputWindow: true,
-  },
-  {
-    id: "sshKey",
-    name: "Copy SSH public key",
-    description: "Adds a selected ~/.ssh public key to authorized_keys on the server.",
-    command: "",
-    recommended: true,
   },
 ];
 
@@ -147,7 +147,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
     setNewKeyName(`nodenet_${server.id}_ed25519`);
   }, [server.id]);
 
-  const runPreset = async (preset: PresetItem) => {
+  const runPreset = async (preset: PresetItem, rethrow = false) => {
     setError("");
     setMessage("");
     setRunning(preset.id);
@@ -175,7 +175,11 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
         setShowPanelCredentialPrompt(true);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const error = err instanceof Error ? err : new Error(String(err));
+      setError(error.message);
+      if (rethrow) {
+        throw error;
+      }
     } finally {
       setRunning(null);
     }
@@ -188,7 +192,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
     try {
       for (const preset of presets) {
         if (selected[preset.id]) {
-          await runPreset(preset);
+          await runPreset(preset, true);
         }
       }
       if (selected.install3xui) {
@@ -207,16 +211,18 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
         throw new Error("Your management IP is required before configuring UFW.");
       }
       const ip = shellQuote(managementIp.trim());
+      const sshPort = Math.max(1, Math.min(65535, Math.round(server.sshPort || 22)));
       return [
         "if ! command -v ufw >/dev/null 2>&1; then apt-get update && apt-get install -y ufw; fi",
-        `ufw allow from ${ip} to any port 22`,
-        "ufw delete allow 22/tcp || true",
+        `ufw allow from ${ip} to any port ${sshPort}`,
+        `ufw delete allow ${sshPort}/tcp || true`,
+        sshPort === 22 ? "" : "ufw delete allow 22/tcp || true",
         "ufw allow 65333/tcp",
         "ufw allow 443/tcp",
         "yes | ufw enable",
         "ufw reload",
         "ufw status verbose",
-      ].join(" && ");
+      ].filter(Boolean).join(" && ");
     }
 
     if (preset.id === "sshKey") {

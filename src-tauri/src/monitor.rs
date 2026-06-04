@@ -193,9 +193,7 @@ pub async fn ping_from_monitor(
         .map(|value| value.round().max(0.0) as u128);
     let status = if !is_online {
         "offline"
-    } else if ping_ms.is_some_and(|value| value > 1_000) {
-        "warning"
-    } else if is_transient_failure {
+    } else if ping_ms.is_some_and(|value| value > 1_000) || is_transient_failure {
         "warning"
     } else {
         "online"
@@ -1182,10 +1180,7 @@ fn shell_single_quote(value: &str) -> String {
 /// `since` maps server IDs to the last known timestamp in milliseconds.
 /// Returns a JSON object with the same shape as the full metrics cache,
 /// containing only the new points for each server.
-pub async fn fetch_metrics_delta(
-    app: &AppHandle,
-    since: &HashMap<String, i64>,
-) -> Result<Value> {
+pub async fn fetch_metrics_delta(app: &AppHandle, since: &HashMap<String, i64>) -> Result<Value> {
     let config = load_config()?;
     let Some(monitor) = monitor_server(&config)? else {
         return Ok(Value::Object(Default::default()));

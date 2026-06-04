@@ -49,7 +49,11 @@ pub async fn read_password(
         .context("failed to execute security find-generic-password")?;
 
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("could not be found") {
+            return Ok(None);
+        }
+        return Err(anyhow!("keychain read failed: {}", stderr.trim()));
     }
 
     let password = String::from_utf8_lossy(&output.stdout).trim().to_string();

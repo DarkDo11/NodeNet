@@ -922,6 +922,7 @@ pub fn list_ssh_public_keys() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn read_ssh_public_key(path: String) -> Result<String, String> {
     let path = expand_public_key_path(&path)?;
+    let path = validate_public_key_path(path)?;
     fs::read_to_string(path).map_err(|error| error.to_string())
 }
 
@@ -1252,9 +1253,13 @@ fn first_u16(line: &str) -> Option<u16> {
 /// epoch-ms timestamps (frontend MetricPoint format saved to local disk).
 fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
     let mut since = HashMap::new();
-    let Some(obj) = cache.as_object() else { return since };
+    let Some(obj) = cache.as_object() else {
+        return since;
+    };
     for (server_id, history) in obj {
-        let Some(arr) = history.as_array() else { continue };
+        let Some(arr) = history.as_array() else {
+            continue;
+        };
         let latest_ms = arr
             .iter()
             .filter_map(|point| {
@@ -1281,7 +1286,9 @@ fn merge_cache_delta(base: &mut Value, delta: Value) {
         return;
     };
     for (server_id, new_points) in delta_obj {
-        let Some(new_arr) = new_points.as_array() else { continue };
+        let Some(new_arr) = new_points.as_array() else {
+            continue;
+        };
         if new_arr.is_empty() {
             continue;
         }
@@ -1305,6 +1312,28 @@ fn expand_public_key_path(path: &str) -> Result<PathBuf, String> {
         return Ok(base_dirs.home_dir().join(rest));
     }
     Ok(PathBuf::from(trimmed))
+}
+
+fn validate_public_key_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("pub") {
+        return Err("SSH public key must be a .pub file".to_string());
+    }
+
+    let base_dirs = directories::BaseDirs::new()
+        .ok_or_else(|| "unable to resolve user directories".to_string())?;
+    let ssh_dir = base_dirs.home_dir().join(".ssh");
+    let ssh_dir = fs::canonicalize(&ssh_dir).map_err(|error| error.to_string())?;
+    let path = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+
+    if !path.starts_with(&ssh_dir) {
+        return Err("SSH public key must be inside ~/.ssh".to_string());
+    }
+
+    if !path.is_file() {
+        return Err("SSH public key path must be a file".to_string());
+    }
+
+    Ok(path)
 }
 
 #[cfg(test)]

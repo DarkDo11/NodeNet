@@ -579,13 +579,10 @@ fn verify_known_host(
             return Ok(());
         }
 
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "SSH host key for '{host_key}' has changed. \
+        return Err(std::io::Error::other(format!(
+            "SSH host key for '{host_key}' has changed. \
                 If the server was reinstalled, remove it from Settings → Known Hosts."
-            ),
-        )
+        ))
         .into());
     }
 

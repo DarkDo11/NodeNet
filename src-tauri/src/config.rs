@@ -151,6 +151,9 @@ pub fn upsert_server(mut server: ServerConfig) -> Result<AppConfig> {
 pub fn delete_server(server_id: &str) -> Result<AppConfig> {
     let mut config = load_config()?;
     config.servers.retain(|server| server.id != server_id);
+    if config.monitor_server_id.as_deref() == Some(server_id) {
+        config.monitor_server_id = None;
+    }
     save_config(&config)?;
     Ok(config)
 }
@@ -178,6 +181,9 @@ pub fn upsert_bastion(mut bastion: BastionConfig) -> Result<AppConfig> {
 pub fn delete_bastion(bastion_id: &str) -> Result<AppConfig> {
     let mut config = load_config()?;
     config.bastions.retain(|bastion| bastion.id != bastion_id);
+    if config.monitor_bastion_id.as_deref() == Some(bastion_id) {
+        config.monitor_bastion_id = None;
+    }
     save_config(&config)?;
     Ok(config)
 }

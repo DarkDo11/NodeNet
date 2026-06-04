@@ -157,9 +157,7 @@ async fn reap_stale_connections() {
             .filter_map(|(key, conn)| {
                 conn.try_lock()
                     .ok()
-                    .filter(|c| {
-                        c.last_used.elapsed() >= Duration::from_secs(SSH_IDLE_TIMEOUT_SECS)
-                    })
+                    .filter(|c| c.last_used.elapsed() >= Duration::from_secs(SSH_IDLE_TIMEOUT_SECS))
                     .map(|_| key.clone())
             })
             .collect()
@@ -660,9 +658,9 @@ async fn execute_streaming_once(
         .await
         .context("ssh stderr stream task failed")??;
 
-    // Exit 255 means SSH itself failed (connection lost/refused), not the remote command.
-    // For streaming commands the output was already shown live; only surface SSH-level errors.
-    if status.code() == Some(255) {
+    // The output was already shown live; the final event only needs to carry
+    // command failure state back to the UI.
+    if !status.success() {
         bail!("ssh command failed with status {status}");
     }
 
@@ -1156,17 +1154,31 @@ fn create_askpass_script(
     let bastion_host = server.bastion_host.as_deref().unwrap_or_default();
     let target_secret = target_secret.unwrap_or_default();
     let bastion_secret = bastion_secret.unwrap_or(target_secret);
-    fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *{}*|*{}*) printf '%s\\n' {} ;;\n  *) printf '%s\\n' {} ;;\nesac\n",
-            shell_case_pattern(&bastion_account),
-            shell_case_pattern(bastion_host),
-            shell_single_quote(bastion_secret),
-            shell_single_quote(target_secret)
-        ),
-    )
-    .with_context(|| format!("failed to write askpass script {}", path.display()))?;
+    let script = format!(
+        "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *{}*|*{}*) printf '%s\\n' {} ;;\n  *) printf '%s\\n' {} ;;\nesac\n",
+        shell_case_pattern(&bastion_account),
+        shell_case_pattern(bastion_host),
+        shell_single_quote(bastion_secret),
+        shell_single_quote(target_secret)
+    );
+
+    #[cfg(unix)]
+    {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&path)
+            .with_context(|| format!("failed to create askpass script {}", path.display()))?;
+        file.write_all(script.as_bytes())
+            .with_context(|| format!("failed to write askpass script {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, script)
+            .with_context(|| format!("failed to write askpass script {}", path.display()))?;
+    }
 
     #[cfg(unix)]
     {
