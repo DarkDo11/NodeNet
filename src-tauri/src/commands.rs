@@ -225,15 +225,19 @@ pub async fn get_metrics(app: AppHandle, server_id: String) -> Result<ServerMetr
 #[tauri::command]
 pub async fn ping_server(app: AppHandle, server_id: String) -> Result<PingResult, String> {
     let server = find_server(&server_id).map_err(|error| error.to_string())?;
-    if let Some(result) = monitor::ping_from_monitor(&app, &server)
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        if result.status != "unknown" {
-            return Ok(result);
+    match monitor::ping_from_monitor(&app, &server).await {
+        Ok(Some(result)) if result.status != "unknown" => return Ok(result),
+        Ok(_) => {}
+        Err(e) => {
+            // Permanent config errors (deleted monitor server/bastion) must be
+            // surfaced so the user knows the monitor is misconfigured.
+            // Transient SSH / connectivity errors are absorbed — fall through
+            // to a direct ping instead of blocking the status view.
+            if e.to_string().contains("was not found") {
+                return Err(e.to_string());
+            }
         }
     }
-
     Ok(ping(&app, &server).await)
 }
 
@@ -999,13 +1003,26 @@ fn public_key_path_for_private(private_key_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.pub", private_key_path.display()))
 }
 
+fn metrics_cache_path() -> anyhow::Result<PathBuf> {
+    Ok(crate::config::config_dir()?.join("metrics-cache.json"))
+}
+
+async fn write_metrics_cache(cache: &Value) -> Result<(), String> {
+    let path = metrics_cache_path().map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
+    tokio::fs::write(path, raw).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
     // Always read the local cache first — it is the persisted baseline from
     // the previous session (written by save_metrics_cache).
-    let path = crate::config::config_dir()
-        .map_err(|e| e.to_string())?
-        .join("metrics-cache.json");
+    let path = metrics_cache_path().map_err(|e| e.to_string())?;
     let local_cache: Value = if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
         serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()))
@@ -1029,33 +1046,33 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
         if let Ok(delta) = monitor::fetch_metrics_delta(&app, &since).await {
             let mut merged = local_cache;
             merge_cache_delta(&mut merged, delta);
+            if let Err(e) = write_metrics_cache(&merged).await {
+                let _ = app.emit("alert-error", format!("metrics cache save failed: {e}"));
+            }
             return Ok(merged);
         }
         // Monitor unreachable — return the local cache so the UI isn't blank.
         return Ok(local_cache);
     }
 
-    // No local cache yet: download the full history from the monitor.
+    // No local cache yet: download the full history from the monitor and
+    // persist it immediately so the next startup can use delta loading.
     if let Ok(Some(full)) = monitor::load_metrics_cache(&app).await {
+        if let Err(e) = write_metrics_cache(&full).await {
+            let _ = app.emit("alert-error", format!("metrics cache save failed: {e}"));
+        }
         return Ok(full);
     }
     Ok(Value::Object(Default::default()))
 }
 
 #[tauri::command]
-pub fn save_metrics_cache(cache: Value) -> Result<(), String> {
-    // Always persist locally — even in monitor mode — so the next startup can
-    // do incremental delta loading instead of downloading the full history.
-    let directory = crate::config::config_dir().map_err(|error| error.to_string())?;
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join("metrics-cache.json");
-    let raw = serde_json::to_string_pretty(&cache).map_err(|error| error.to_string())?;
-    fs::write(path, raw).map_err(|error| error.to_string())
+pub async fn save_metrics_cache(cache: Value) -> Result<(), String> {
+    write_metrics_cache(&cache).await
 }
 
 fn remove_server_from_metrics_cache(server_id: &str) -> anyhow::Result<()> {
-    let directory = crate::config::config_dir()?;
-    let path = directory.join("metrics-cache.json");
+    let path = metrics_cache_path()?;
     if !path.exists() {
         return Ok(());
     }
