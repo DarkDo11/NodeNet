@@ -410,13 +410,23 @@ $SUDO systemctl stop nodenet-monitor.timer nodenet-monitor.service >/dev/null 2>
 $SUDO systemctl reset-failed nodenet-monitor.timer nodenet-monitor.service >/dev/null 2>&1 || true
 $SUDO mkdir -p {config_dir} {data_dir}
 $SUDO mkdir -p {keys_dir}
-$SUDO python3 -m py_compile {agent_tmp}
-$SUDO mv {agent_tmp} {agent_path}
-$SUDO mv {config_tmp} {config_path}
-$SUDO mv {service_tmp} {service_path}
-$SUDO mv {timer_tmp} {timer_path}
-$SUDO chmod 755 {agent_path}
-$SUDO chmod 644 {config_path} {service_path} {timer_path}
+if [ -e {agent_tmp} ]; then
+  $SUDO python3 -m py_compile {agent_tmp}
+  $SUDO mv {agent_tmp} {agent_path}
+  $SUDO chmod 755 {agent_path}
+fi
+if [ -e {config_tmp} ]; then
+  $SUDO mv {config_tmp} {config_path}
+  $SUDO chmod 644 {config_path}
+fi
+if [ -e {service_tmp} ]; then
+  $SUDO mv {service_tmp} {service_path}
+  $SUDO chmod 644 {service_path}
+fi
+if [ -e {timer_tmp} ]; then
+  $SUDO mv {timer_tmp} {timer_path}
+  $SUDO chmod 644 {timer_path}
+fi
 for key_tmp in /tmp/nodenet-monitor-key-*.{upload_id}.tmp; do
   [ -e "$key_tmp" ] || continue
   key_name=$(basename "$key_tmp")
