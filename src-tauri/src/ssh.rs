@@ -739,6 +739,13 @@ async fn download_file_once(
     )
     .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
+    let connection = get_or_create_connection(app, server).await?;
+    let control_path = {
+        let mut connection = connection.lock().await;
+        connection.last_used = Instant::now();
+        connection.control_path.clone()
+    };
+
     let askpass = create_transfer_askpass(app, server).await?;
     let mut command = Command::new("sftp");
     command
@@ -750,9 +757,11 @@ async fn download_file_once(
         .arg("-o")
         .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
-        .arg("ControlMaster=no")
+        .arg("ControlMaster=auto")
         .arg("-o")
-        .arg("ControlPersist=no")
+        .arg(format!("ControlPersist={SSH_IDLE_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg(format!("ControlPath={}", control_path.display()))
         .arg("-o")
         .arg("ServerAliveInterval=5")
         .arg("-o")
@@ -787,7 +796,10 @@ async fn download_file_once(
     {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => return Err(anyhow!("failed to execute sftp: {error}")),
-        Err(_) => bail!("sftp download timed out"),
+        Err(_) => {
+            invalidate_connection(server, &control_path).await;
+            bail!("sftp download timed out");
+        }
     };
 
     if !output.status.success() {
@@ -795,6 +807,9 @@ async fn download_file_once(
             "sftp download failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
         return Err(anyhow!(message));
     }
 
@@ -834,6 +849,13 @@ async fn upload_file_once(
     )
     .with_context(|| format!("failed to write sftp batch {}", batch_path.path().display()))?;
 
+    let connection = get_or_create_connection(app, server).await?;
+    let control_path = {
+        let mut connection = connection.lock().await;
+        connection.last_used = Instant::now();
+        connection.control_path.clone()
+    };
+
     let askpass = create_transfer_askpass(app, server).await?;
     let mut command = Command::new("sftp");
     command
@@ -845,9 +867,11 @@ async fn upload_file_once(
         .arg("-o")
         .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
         .arg("-o")
-        .arg("ControlMaster=no")
+        .arg("ControlMaster=auto")
         .arg("-o")
-        .arg("ControlPersist=no")
+        .arg(format!("ControlPersist={SSH_IDLE_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg(format!("ControlPath={}", control_path.display()))
         .arg("-o")
         .arg("ServerAliveInterval=5")
         .arg("-o")
@@ -882,7 +906,10 @@ async fn upload_file_once(
     {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => return Err(anyhow!("failed to execute sftp: {error}")),
-        Err(_) => bail!("sftp upload timed out"),
+        Err(_) => {
+            invalidate_connection(server, &control_path).await;
+            bail!("sftp upload timed out");
+        }
     };
 
     if !output.status.success() {
@@ -890,6 +917,9 @@ async fn upload_file_once(
             "sftp upload failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
         return Err(anyhow!(message));
     }
 
@@ -1136,8 +1166,9 @@ fn is_connection_reuse_error(message: &str) -> bool {
         || message.contains("read from master failed")
         || message.contains("broken pipe")
         || message.contains("control socket")
-        || message.contains("connection closed by")
+        || message.contains("connection closed")
         || message.contains("connection reset")
+        || message.contains("timed out")
 }
 
 fn create_askpass_script(
