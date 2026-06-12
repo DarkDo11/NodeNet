@@ -24,8 +24,10 @@ const KEYCHAIN_SERVICE: &str = "nodenet.3x-ui";
 const LEGACY_KEYCHAIN_SERVICE: &str = "vpnctrl.3x-ui";
 const INBOUNDS_API: &str = "/panel/api/inbounds";
 const XRAY_CONFIG_API: &str = "/panel/api/server/getConfigJson";
-const XRAY_TEMPLATE_API: &str = "/panel/xray";
-const XRAY_UPDATE_API: &str = "/panel/xray/update";
+const XRAY_TEMPLATE_API: &str = "/panel/api/xray";
+const XRAY_TEMPLATE_API_LEGACY: &str = "/panel/xray";
+const XRAY_UPDATE_API: &str = "/panel/api/xray/update";
+const XRAY_UPDATE_API_LEGACY: &str = "/panel/xray/update";
 const SERVER_RESTART_XRAY_API: &str = "/panel/api/server/restartXrayService";
 const DEFAULT_OUTBOUND_TEST_URL: &str = "https://www.google.com/generate_204";
 const XUI_BIN_DIR: &str = "/usr/local/x-ui/bin";
@@ -231,16 +233,21 @@ pub async fn save_xray_config(
 }
 
 async fn get_xray_panel_settings(session: &mut PanelSession) -> Result<XrayPanelSettings> {
-    match session.post_value(XRAY_TEMPLATE_API).await {
-        Ok(response) => parse_xray_panel_settings(response),
-        Err(template_error) => {
-            let response = session
-                .get_value(XRAY_CONFIG_API)
-                .await
-                .with_context(|| format!("3x-ui Xray template API failed ({template_error})"))?;
-            parse_xray_panel_settings(response)
-        }
-    }
+    let template_error = match session.post_value(XRAY_TEMPLATE_API).await {
+        Ok(response) => return parse_xray_panel_settings(response),
+        Err(error) => error,
+    };
+    // 3x-ui < v3 served the Xray template at /panel/xray instead of /panel/api/xray.
+    let legacy_error = match session.post_value(XRAY_TEMPLATE_API_LEGACY).await {
+        Ok(response) => return parse_xray_panel_settings(response),
+        Err(error) => error,
+    };
+    let response = session.get_value(XRAY_CONFIG_API).await.with_context(|| {
+        format!(
+            "3x-ui Xray template API failed ({template_error}); legacy API also failed ({legacy_error})"
+        )
+    })?;
+    parse_xray_panel_settings(response)
 }
 
 async fn save_xray_config_with_session(session: &mut PanelSession, config: &Value) -> Result<()> {
@@ -253,7 +260,11 @@ async fn save_xray_config_with_session(session: &mut PanelSession, config: &Valu
         ("xraySetting", xray_setting),
         ("outboundTestUrl", outbound_test_url),
     ];
-    session.post_form_action(XRAY_UPDATE_API, &form).await
+    match session.post_form_action(XRAY_UPDATE_API, &form).await {
+        Ok(()) => Ok(()),
+        // 3x-ui < v3 served the Xray update API at /panel/xray/update instead of /panel/api/xray/update.
+        Err(_) => session.post_form_action(XRAY_UPDATE_API_LEGACY, &form).await,
+    }
 }
 
 async fn save_xray_config_via_ssh(
