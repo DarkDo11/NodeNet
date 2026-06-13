@@ -793,6 +793,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=180
 ExecStart=/usr/local/bin/nodenet-monitor-agent
 "#
 }
@@ -822,6 +823,7 @@ import pathlib
 import shlex
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 CONFIG_PATH = "/etc/nodenet-monitor/config.json"
@@ -1128,20 +1130,29 @@ def main():
     if not isinstance(servers, list):
         servers = []
 
-    for server in servers:
-        if not isinstance(server, dict):
-            continue
+    valid_servers = [server for server in servers if isinstance(server, dict) and server.get("id")]
+
+    def collect(server):
+        try:
+            return run_metrics(config, server), None
+        except Exception as error:
+            return None, error
+
+    if valid_servers:
+        with ThreadPoolExecutor(max_workers=min(len(valid_servers), 16)) as executor:
+            results = list(executor.map(collect, valid_servers))
+    else:
+        results = []
+
+    for server, (point, error) in zip(valid_servers, results):
         server_id = server.get("id")
-        if not server_id:
-            continue
         history = cache.get(server_id) or []
         if not isinstance(history, list):
             history = []
         previous = history[-1] if history else None
         if not isinstance(previous, dict):
             previous = None
-        try:
-            point = run_metrics(config, server)
+        if error is None:
             fail_counts.pop(server_id, None)
             if server_id in down:
                 down.remove(server_id)
@@ -1153,7 +1164,7 @@ def main():
             else:
                 high_since.pop(server_id, None)
                 high_alerted.discard(server_id)
-        except Exception as error:
+        else:
             fail_count = int(fail_counts.get(server_id) or 0) + 1
             fail_counts[server_id] = fail_count
             if fail_count < 2:
