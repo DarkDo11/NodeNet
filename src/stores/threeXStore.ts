@@ -14,11 +14,11 @@ interface ThreeXState {
   xrayConfigByServer: Record<string, XrayConfig>;
   selectedInboundIdByServer: Record<string, number | null>;
   errorByServer: Record<string, string>;
-  isLoadingInbounds: boolean;
-  isLoadingClients: boolean;
+  loadingInboundsById: Record<string, boolean>;
+  loadingClientsById: Record<string, boolean>;
   isLoadingXrayConfig: boolean;
   isSavingXrayConfig: boolean;
-  isRunningAction: boolean;
+  runningActionById: Record<string, boolean>;
   actionMessage: string;
   qrLink: string | null;
   qrTitle: string;
@@ -111,11 +111,11 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
   xrayConfigByServer: {},
   selectedInboundIdByServer: {},
   errorByServer: {},
-  isLoadingInbounds: false,
-  isLoadingClients: false,
+  loadingInboundsById: {},
+  loadingClientsById: {},
   isLoadingXrayConfig: false,
   isSavingXrayConfig: false,
-  isRunningAction: false,
+  runningActionById: {},
   actionMessage: "",
   qrLink: null,
   qrTitle: "",
@@ -130,7 +130,7 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
     })),
 
   loadInbounds: async (serverId) => {
-    set({ isLoadingInbounds: true });
+    set((state) => ({ loadingInboundsById: { ...state.loadingInboundsById, [serverId]: true } }));
     try {
       const inbounds = await invoke<ThreeXInbound[]>("get_inbounds", { serverId });
       const currentSelected = get().selectedInboundIdByServer[serverId];
@@ -152,7 +152,7 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
           ...state.errorByServer,
           [serverId]: "",
         },
-        isLoadingInbounds: false,
+        loadingInboundsById: { ...state.loadingInboundsById, [serverId]: false },
       }));
 
       if (selectedInboundId !== null) {
@@ -164,13 +164,13 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
           ...state.errorByServer,
           [serverId]: error instanceof Error ? error.message : String(error),
         },
-        isLoadingInbounds: false,
+        loadingInboundsById: { ...state.loadingInboundsById, [serverId]: false },
       }));
     }
   },
 
   loadClients: async (serverId, inboundId) => {
-    set({ isLoadingClients: true });
+    set((state) => ({ loadingClientsById: { ...state.loadingClientsById, [serverId]: true } }));
     try {
       const clients = await invoke<ThreeXClient[]>("get_clients", { serverId, inboundId });
       set((state) => ({
@@ -178,7 +178,7 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
           ...state.clientsByInbound,
           [inboundKey(serverId, inboundId)]: clients,
         },
-        isLoadingClients: false,
+        loadingClientsById: { ...state.loadingClientsById, [serverId]: false },
       }));
     } catch (error) {
       set((state) => ({
@@ -186,7 +186,7 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
           ...state.errorByServer,
           [serverId]: error instanceof Error ? error.message : String(error),
         },
-        isLoadingClients: false,
+        loadingClientsById: { ...state.loadingClientsById, [serverId]: false },
       }));
     }
   },
@@ -247,195 +247,147 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
   },
 
   uploadRoutingFile: async (serverId, localPath, remoteFilename) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((state) => ({ runningActionById: { ...state.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       const remotePath = await invoke<string>("upload_routing_file", {
         serverId,
         localPath,
         remoteFilename: remoteFilename?.trim() || null,
       });
-      set({
-        isRunningAction: false,
+      set((state) => ({
+        runningActionById: { ...state.runningActionById, [serverId]: false },
         actionMessage: `Routing file uploaded to ${remotePath}`,
-      });
+      }));
       return remotePath;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      set({ isRunningAction: false, actionMessage: message });
+      set((state) => ({ runningActionById: { ...state.runningActionById, [serverId]: false }, actionMessage: message }));
       throw error;
     }
   },
 
   addClient: async (serverId, inboundId, name, limitGb, expireDays) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
-      await invoke<ThreeXClient>("add_client", {
-        serverId,
-        inboundId,
-        name,
-        limitGb,
-        expireDays,
-      });
+      await invoke<ThreeXClient>("add_client", { serverId, inboundId, name, limitGb, expireDays });
       await get().loadInbounds(serverId);
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: "Client added" });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: "Client added" }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   deleteClient: async (serverId, inboundId, clientId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       await invoke("delete_client", { serverId, inboundId, clientId });
       await get().loadInbounds(serverId);
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: "Client deleted" });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: "Client deleted" }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   resetClientTraffic: async (serverId, inboundId, clientId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       await invoke("reset_client_traffic", { serverId, inboundId, clientId });
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: "Traffic reset" });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: "Traffic reset" }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   resetAllExpired: async (serverId, inboundId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       const count = await invoke<number>("reset_all_expired_clients", { serverId, inboundId });
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: `Reset ${count} expired clients` });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: `Reset ${count} expired clients` }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   deleteAllDisabled: async (serverId, inboundId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       const count = await invoke<number>("delete_all_disabled_clients", { serverId, inboundId });
       await get().loadInbounds(serverId);
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: `Deleted ${count} disabled clients` });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: `Deleted ${count} disabled clients` }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   exportClientsCsv: async (serverId, inboundId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       const path = await invoke<string>("export_clients_csv", { serverId, inboundId });
-      set({ isRunningAction: false, actionMessage: `CSV exported: ${path}` });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: `CSV exported: ${path}` }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   extendClient: async (serverId, inboundId, clientId, days) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
-      await invoke<ThreeXClient>("extend_client", {
-        serverId,
-        inboundId,
-        clientId,
-        days,
-      });
+      await invoke<ThreeXClient>("extend_client", { serverId, inboundId, clientId, days });
       await get().loadClients(serverId, inboundId);
-      set({ isRunningAction: false, actionMessage: `Extended by ${days} days` });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: `Extended by ${days} days` }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   generateClientLink: async (serverId, inboundId, client) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
-      const link = await invoke<string>("generate_client_link", {
-        serverId,
-        inboundId,
-        clientId: client.id,
-      });
-      set({
+      const link = await invoke<string>("generate_client_link", { serverId, inboundId, clientId: client.id });
+      set((s) => ({
         qrLink: link,
         qrTitle: client.email,
-        isRunningAction: false,
-      });
+        runningActionById: { ...s.runningActionById, [serverId]: false },
+      }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   closeQr: () => set({ qrLink: null, qrTitle: "" }),
 
   restartXray: async (serverId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       await invoke("restart_xray", { serverId });
-      set({ isRunningAction: false, actionMessage: "Xray restarted" });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: "Xray restarted" }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   rebootServer: async (serverId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       await invoke("reboot_server", { serverId });
-      set({ isRunningAction: false, actionMessage: "Reboot command sent" });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: "Reboot command sent" }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
   downloadConfig: async (serverId) => {
-    set({ isRunningAction: true, actionMessage: "" });
+    set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: true }, actionMessage: "" }));
     try {
       const path = await invoke<string>("download_config", { serverId });
-      set({ isRunningAction: false, actionMessage: `Backup saved: ${path}` });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: `Backup saved: ${path}` }));
     } catch (error) {
-      set({
-        isRunningAction: false,
-        actionMessage: error instanceof Error ? error.message : String(error),
-      });
+      set((s) => ({ runningActionById: { ...s.runningActionById, [serverId]: false }, actionMessage: error instanceof Error ? error.message : String(error) }));
     }
   },
 
@@ -451,12 +403,15 @@ export const useThreeXStore = create<ThreeXState>((set, get) => ({
         invoke<ThreeXInbound[]>("get_inbounds", { serverId: server.id }),
       ),
     );
-    if (results.some((result) => result.status === "rejected")) {
+
+    const fulfilled = results.filter(
+      (result): result is PromiseFulfilledResult<ThreeXInbound[]> => result.status === "fulfilled",
+    );
+    if (fulfilled.length === 0) {
       return;
     }
 
-    const totals = results
-      .filter((result): result is PromiseFulfilledResult<ThreeXInbound[]> => result.status === "fulfilled")
+    const totals = fulfilled
       .map((result) => totalTraffic(result.value))
       .reduce(
         (acc, item) => ({

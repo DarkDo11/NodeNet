@@ -71,7 +71,7 @@ const main = async () => {
   writeJson(packageJsonPath, packageJson);
   updateCargoPackageVersion(cargoTomlPath, nextVersion);
 
-  execFileSync("git", ["add", "-A"], { stdio: "inherit" });
+  execFileSync("git", ["add", tauriConfigPath, packageJsonPath, cargoTomlPath], { stdio: "inherit" });
   execFileSync("git", ["commit", "-m", `chore: release v${nextVersion}`], { stdio: "inherit" });
   execFileSync("git", ["tag", `v${nextVersion}`], { stdio: "inherit" });
 

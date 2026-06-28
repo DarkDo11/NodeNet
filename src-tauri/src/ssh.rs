@@ -151,27 +151,31 @@ pub fn start_connection_reaper() {
 }
 
 async fn reap_stale_connections() {
-    let stale_keys: Vec<String> = {
+    // Phase 1: collect stale entries — capture Arc pointer + control_path while pool is locked.
+    let stale: Vec<(String, Arc<Mutex<SshConnection>>, std::path::PathBuf)> = {
         let pool = SSH_POOL.lock().await;
         pool.iter()
             .filter_map(|(key, conn)| {
                 conn.try_lock()
                     .ok()
                     .filter(|c| c.last_used.elapsed() >= Duration::from_secs(SSH_IDLE_TIMEOUT_SECS))
-                    .map(|_| key.clone())
+                    .map(|c| (key.clone(), conn.clone(), c.control_path.clone()))
             })
             .collect()
     };
 
-    if stale_keys.is_empty() {
+    if stale.is_empty() {
         return;
     }
 
+    // Phase 2: remove only the exact Arc we captured — prevents removing a freshly-inserted
+    // connection that reused the same key between the two lock acquisitions.
     let mut pool = SSH_POOL.lock().await;
-    for key in &stale_keys {
-        if let Some(conn) = pool.remove(key) {
-            if let Ok(conn) = conn.try_lock() {
-                let _ = fs::remove_file(&conn.control_path);
+    for (key, arc, control_path) in stale {
+        if let Some(existing) = pool.get(&key) {
+            if Arc::ptr_eq(existing, &arc) {
+                pool.remove(&key);
+                let _ = fs::remove_file(&control_path);
             }
         }
     }
@@ -385,7 +389,12 @@ pub async fn open_bastion_tunnel(
         .arg("-N")
         .arg("-L")
         .arg(format!(
-            "127.0.0.1:{local_port}:{target_host}:{target_port}"
+            "127.0.0.1:{local_port}:{host}:{target_port}",
+            host = if target_host.contains(':') {
+                format!("[{target_host}]")
+            } else {
+                target_host.to_string()
+            }
         ))
         .arg("-p")
         .arg(port.to_string())
@@ -423,12 +432,15 @@ pub async fn open_bastion_tunnel(
 
     command.arg(format!("{user}@{host}"));
 
-    // Release the reserved port so SSH can bind to it; the window between
-    // drop and spawn is microseconds — far shorter than before the fix.
-    drop(port_guard);
+    // Drop the reservation only after the ssh process has started so it can
+    // inherit/reuse the ephemeral port.  On POSIX, calling close(2) on the
+    // listener while ssh attempts bind(2) on the same port is a data race,
+    // but the OS typically serialises them; the window is microseconds either
+    // way.  Keeping the guard alive until after spawn minimises it further.
     let mut child = command
         .spawn()
         .context("Bastion tunnel failed: could not start ssh")?;
+    drop(port_guard);
     let ready = wait_for_tunnel(&mut child, local_port).await;
 
     ready?;
@@ -643,7 +655,7 @@ async fn execute_streaming_once(
         session_id.to_string(),
         stdout,
     ));
-    let stderr_task = tokio::spawn(stream_command_output(
+    let stderr_task = tokio::spawn(stream_command_output_collect(
         app.clone(),
         server.clone(),
         session_id.to_string(),
@@ -654,14 +666,16 @@ async fn execute_streaming_once(
     stdout_task
         .await
         .context("ssh stdout stream task failed")??;
-    stderr_task
+    let stderr_output = stderr_task
         .await
         .context("ssh stderr stream task failed")??;
 
-    // The output was already shown live; the final event only needs to carry
-    // command failure state back to the UI.
     if !status.success() {
-        bail!("ssh command failed with status {status}");
+        let message = format!("ssh command failed with status {status}: {stderr_output}");
+        if is_connection_reuse_error(&message) {
+            invalidate_connection(server, &control_path).await;
+        }
+        bail!("{message}");
     }
 
     Ok(())
@@ -685,6 +699,29 @@ where
         emit_command_output(&app, &server, &session_id, &line, false);
     }
     Ok(())
+}
+
+async fn stream_command_output_collect<R>(
+    app: AppHandle,
+    server: ServerConfig,
+    session_id: String,
+    stream: R,
+) -> Result<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut collected = String::new();
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("failed to read ssh output")?
+    {
+        emit_command_output(&app, &server, &session_id, &line, false);
+        collected.push_str(&line);
+        collected.push('\n');
+    }
+    Ok(collected)
 }
 
 fn emit_command_output(
@@ -931,32 +968,43 @@ async fn get_or_create_connection(
     server: &ServerConfig,
 ) -> Result<Arc<Mutex<SshConnection>>> {
     let account = connection_pool_account(server);
-    let mut pool = SSH_POOL.lock().await;
-    if let Some(connection) = pool.get(&account).cloned() {
+
+    // Phase 1: check existing connection WITHOUT holding the pool lock during I/O.
+    let existing = SSH_POOL.lock().await.get(&account).cloned();
+    if let Some(connection) = existing {
         let (is_fresh, control_path) = {
-            let connection = connection.lock().await;
+            let conn = connection.lock().await;
             (
-                connection.last_used.elapsed() < Duration::from_secs(SSH_IDLE_TIMEOUT_SECS),
-                connection.control_path.clone(),
+                conn.last_used.elapsed() < Duration::from_secs(SSH_IDLE_TIMEOUT_SECS),
+                conn.control_path.clone(),
             )
         };
-        let alive = is_fresh && is_connection_alive(server, &control_path).await;
-
-        if alive {
+        // is_connection_alive does I/O — must NOT hold pool lock here.
+        if is_fresh && is_connection_alive(server, &control_path).await {
             return Ok(connection);
         }
-
-        pool.remove(&account);
-        close_master(server, &control_path).await;
+        // Stale: remove from pool and clean up the old socket.
+        let removed = {
+            let mut pool = SSH_POOL.lock().await;
+            if pool.get(&account).map(|c| Arc::ptr_eq(c, &connection)).unwrap_or(false) {
+                pool.remove(&account)
+            } else {
+                None
+            }
+        };
+        if removed.is_some() {
+            close_master(server, &control_path).await;
+        }
     }
 
+    // Phase 2: open a new master — I/O outside the pool lock.
     let control_path = ssh_control_path()?;
     open_master(app, server, &control_path).await?;
     let connection = Arc::new(Mutex::new(SshConnection {
         control_path,
         last_used: Instant::now(),
     }));
-    pool.insert(account, Arc::clone(&connection));
+    SSH_POOL.lock().await.insert(account, Arc::clone(&connection));
     Ok(connection)
 }
 
@@ -1021,10 +1069,8 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
 
     let mut command = Command::new("ssh");
     command
-        .kill_on_drop(true)
         .arg("-M")
         .arg("-N")
-        .arg("-f")
         .arg("-p")
         .arg(server.ssh_port.to_string())
         .arg("-o")
@@ -1063,21 +1109,46 @@ async fn open_master(app: &AppHandle, server: &ServerConfig, control_path: &Path
             .env("DISPLAY", ":0");
     }
 
-    command.arg(format!("{}@{}", server.ssh_user, server.host));
+    command
+        .arg(format!("{}@{}", server.ssh_user, server.host))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
-    let output = timeout(
-        Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS + 4),
-        command.output(),
-    )
-    .await
-    .context("ssh master connection timed out")?
-    .context("failed to start ssh master connection")?;
+    // Spawn without -f so that a non-zero exit code is visible.  The master
+    // runs in the background; we poll until the control socket appears.
+    let mut child = command.spawn().context("failed to start ssh master")?;
 
-    if !output.status.success() {
-        return Err(anyhow!(
-            "ssh master connection failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let deadline = Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS + 4);
+    let poll_interval = Duration::from_millis(200);
+    let start = std::time::Instant::now();
+
+    loop {
+        // Check if the process has already exited (means it failed).
+        match child.try_wait().context("ssh master process error")? {
+            Some(status) if !status.success() => {
+                let stderr = if let Some(mut s) = child.stderr.take() {
+                    let mut buf = String::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_string(&mut s, &mut buf).await;
+                    buf
+                } else {
+                    String::new()
+                };
+                return Err(anyhow!("ssh master connection failed: {}", stderr.trim()));
+            }
+            Some(_) => break, // exited with 0 — shouldn't happen for -N but treat as ok
+            None => {}
+        }
+
+        if is_connection_alive(server, control_path).await {
+            break;
+        }
+
+        if start.elapsed() >= deadline {
+            let _ = child.kill().await;
+            bail!("ssh master connection timed out");
+        }
+
+        tokio::time::sleep(poll_interval).await;
     }
 
     Ok(())
@@ -1185,10 +1256,12 @@ fn create_askpass_script(
     let bastion_host = server.bastion_host.as_deref().unwrap_or_default();
     let target_secret = target_secret.unwrap_or_default();
     let bastion_secret = bastion_secret.unwrap_or(target_secret);
+    // Use grep -F (fixed-string) to avoid any pattern-escaping issues with
+    // special characters in account names or hostnames.
     let script = format!(
-        "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *{}*|*{}*) printf '%s\\n' {} ;;\n  *) printf '%s\\n' {} ;;\nesac\n",
-        shell_case_pattern(&bastion_account),
-        shell_case_pattern(bastion_host),
+        "#!/bin/sh\nprompt=\"$1\"\nif printf '%s' \"$prompt\" | grep -qF {} || printf '%s' \"$prompt\" | grep -qF {}; then\n  printf '%s\\n' {}\nelse\n  printf '%s\\n' {}\nfi\n",
+        shell_single_quote(&bastion_account),
+        shell_single_quote(bastion_host),
         shell_single_quote(bastion_secret),
         shell_single_quote(target_secret)
     );
@@ -1293,6 +1366,9 @@ fn bastion_host(server: &ServerConfig) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        // OpenSSH parses ProxyJump values as comma-separated hop lists;
+        // a comma in the hostname would silently add an extra hop.
+        .filter(|value| !value.contains(','))
 }
 
 fn bastion_user(server: &ServerConfig) -> &str {
@@ -1304,19 +1380,10 @@ fn bastion_user(server: &ServerConfig) -> &str {
         .unwrap_or(server.ssh_user.as_str())
 }
 
-fn shell_case_pattern(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| match character {
-            '\\' | '*' | '?' | '[' | ']' => ['\\', character],
-            _ => ['\0', character],
-        })
-        .filter(|character| *character != '\0')
-        .collect()
-}
-
 fn sftp_quote(path: &str) -> String {
-    format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+    // sftp batch mode splits on newlines regardless of quoting, so strip them.
+    let sanitized = path.replace(['\n', '\r'], "");
+    format!("\"{}\"", sanitized.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn shell_single_quote(value: &str) -> String {

@@ -37,7 +37,7 @@ export default function Onboarding({
   const [country, setCountry] = useState("DE");
   const [panelUrl, setPanelUrl] = useState("");
   const [panelUser, setPanelUser] = useState("admin");
-  const [sslVerify, setSslVerify] = useState(false);
+  const [sslVerify, setSslVerify] = useState(true);
   const [sshPassword, setSshPassword] = useState("");
   const [sshKeyPath, setSshKeyPath] = useState("");
   const [sshKeyPassphrase, setSshKeyPassphrase] = useState("");

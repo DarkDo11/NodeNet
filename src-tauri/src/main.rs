@@ -107,6 +107,7 @@ fn main() {
             commands::create_ssh_key_pair,
             commands::load_metrics_cache,
             commands::save_metrics_cache,
+            commands::get_public_ip,
             tray::rebuild_tray,
             terminal::terminal_connect,
             terminal::terminal_input,

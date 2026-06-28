@@ -10,12 +10,17 @@ use russh::client;
 use russh::keys::{key::PrivateKeyWithHashAlg, load_secret_key};
 use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, OnceLock}, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 const TERMINAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+static KNOWN_HOSTS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+fn known_hosts_lock() -> &'static Mutex<()> {
+    KNOWN_HOSTS_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Default)]
 pub struct TerminalState {
@@ -60,7 +65,7 @@ impl client::Handler for TerminalClient {
         &mut self,
         server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        verify_known_host(&self.known_hosts_path, &self.host_key, server_public_key)?;
+        verify_known_host(&self.known_hosts_path, &self.host_key, server_public_key).await?;
         Ok(true)
     }
 }
@@ -84,7 +89,14 @@ pub async fn terminal_connect(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let (tx, rx) = mpsc::unbounded_channel();
 
-    state.sessions.lock().await.insert(session_id.clone(), tx);
+    {
+        let mut sessions = state.sessions.lock().await;
+        // If a worker already exists for this session_id, shut it down before replacing.
+        if let Some(old_tx) = sessions.remove(&session_id) {
+            let _ = old_tx.send(TerminalCommand::Disconnect);
+        }
+        sessions.insert(session_id.clone(), tx);
+    }
 
     tauri::async_runtime::spawn(run_terminal_worker(
         app,
@@ -176,7 +188,7 @@ async fn run_terminal_worker(
                 emit_status(&app, &session_id, &server.id, "connected", "Connected");
 
                 match run_live_terminal(&app, &session_id, &server.id, &mut live, &mut rx).await {
-                    LiveResult::Disconnect => {
+                    LiveResult::Disconnect | LiveResult::Done => {
                         let _ = live.channel.close().await;
                         let _ = live
                             .session
@@ -257,6 +269,7 @@ struct LiveTerminal {
 
 enum LiveResult {
     Disconnect,
+    Done,
     Reconnect {
         next_cols: u32,
         next_rows: u32,
@@ -519,6 +532,9 @@ async fn run_live_terminal(
                         emit_output(app, session_id, server_id, &String::from_utf8_lossy(&data));
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        if exit_status == 0 {
+                            return LiveResult::Done;
+                        }
                         return LiveResult::Reconnect {
                             next_cols: live.cols,
                             next_rows: live.rows,
@@ -562,7 +578,7 @@ fn emit_status(app: &AppHandle, session_id: &str, server_id: &str, status: &str,
     );
 }
 
-fn verify_known_host(
+async fn verify_known_host(
     path: &PathBuf,
     host_key: &str,
     server_public_key: &russh::keys::ssh_key::PublicKey,
@@ -572,7 +588,10 @@ fn verify_known_host(
             .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
             .as_ref(),
     );
-    let mut known_hosts = read_known_hosts(path)?;
+
+    let _guard = known_hosts_lock().lock().await;
+
+    let mut known_hosts = read_known_hosts(path).await?;
 
     if let Some(stored_fingerprint) = known_hosts.0.get(host_key) {
         if stored_fingerprint == &fingerprint {
@@ -587,35 +606,35 @@ fn verify_known_host(
     }
 
     known_hosts.0.insert(host_key.to_string(), fingerprint);
-    write_known_hosts(path, &known_hosts)?;
+    write_known_hosts(path, &known_hosts).await?;
 
     Ok(())
 }
 
-fn read_known_hosts(path: &PathBuf) -> std::result::Result<KnownHosts, russh::Error> {
+async fn read_known_hosts(path: &PathBuf) -> std::result::Result<KnownHosts, russh::Error> {
     if !path.exists() {
         return Ok(KnownHosts::default());
     }
 
-    let raw = fs::read_to_string(path)?;
+    let raw = tokio::fs::read_to_string(path).await?;
     Ok(serde_json::from_str::<KnownHosts>(&raw)
         .or_else(|_| serde_json::from_str::<HashMap<String, String>>(&raw).map(KnownHosts))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?)
 }
 
-fn write_known_hosts(
+async fn write_known_hosts(
     path: &PathBuf,
     known_hosts: &KnownHosts,
 ) -> std::result::Result<(), russh::Error> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
-    fs::write(
+    tokio::fs::write(
         path,
         serde_json::to_string_pretty(&known_hosts.0)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-    )?;
+    ).await?;
 
     Ok(())
 }

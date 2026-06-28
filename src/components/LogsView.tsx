@@ -24,7 +24,9 @@ export default function LogsView({
   const [monitorTarget, setMonitorTarget] = useState("monitor");
   const [monitorLogKind, setMonitorLogKind] = useState("monitor");
   const [serverLogKind, setServerLogKind] = useState("system");
-  const [serverLogServerId, setServerLogServerId] = useState(selectedServerId ?? servers[0]?.id ?? "");
+  const [serverLogServerId, setServerLogServerId] = useState("");
+  const effectiveServerId = serverLogServerId || selectedServerId || servers[0]?.id || "";
+
   const [monitorOutput, setMonitorOutput] = useState("");
   const [serverOutput, setServerOutput] = useState("");
   const [monitorError, setMonitorError] = useState("");
@@ -47,7 +49,7 @@ export default function LogsView({
 
   const loadLogs = async (panel: LogsPanel) => {
     const isMonitorPanel = panel === "monitor";
-    const targetValue = isMonitorPanel ? monitorTarget : `server:${serverLogServerId}`;
+    const targetValue = isMonitorPanel ? monitorTarget : `server:${effectiveServerId}`;
     const [kind, id] = targetValue.split(":", 2) as [LogsTargetKind, string | undefined];
     const logKind = isMonitorPanel ? monitorLogKind : serverLogKind;
 
@@ -146,7 +148,7 @@ export default function LogsView({
           <div className="logs-toolbar">
             <label className="field">
               <span>Server</span>
-              <select value={serverLogServerId} onChange={(event) => setServerLogServerId(event.target.value)}>
+              <select value={effectiveServerId} onChange={(event) => setServerLogServerId(event.target.value)}>
                 {servers.map((server) => (
                   <option key={server.id} value={server.id}>
                     {server.name}

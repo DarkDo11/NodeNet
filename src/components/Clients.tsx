@@ -48,7 +48,7 @@ export default function Clients({
   const [name, setName] = useState("");
   const [limitGb, setLimitGb] = useState(30);
   const [expireDays, setExpireDays] = useState(30);
-  const [extendDays, setExtendDays] = useState(30);
+  const [extendDaysByClient, setExtendDaysByClient] = useState<Record<string, number>>({});
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortKey, setSortKey] = useState<"email" | "traffic" | "expiry">("email");
@@ -232,16 +232,19 @@ export default function Clients({
                   type="number"
                   min={1}
                   max={365}
-                  value={extendDays}
+                  value={extendDaysByClient[client.id] ?? 30}
                   onChange={(event) => {
                     const value = Number(event.target.value);
                     if (Number.isFinite(value)) {
-                      setExtendDays(Math.min(365, Math.max(1, Math.round(value))));
+                      setExtendDaysByClient((prev) => ({
+                        ...prev,
+                        [client.id]: Math.min(365, Math.max(1, Math.round(value))),
+                      }));
                     }
                   }}
                   title="Extend days"
                 />
-                <button className="icon-button" disabled={!canAct} onClick={() => onExtend(client, extendDays)} title={`Extend ${extendDays} days`}>
+                <button className="icon-button" disabled={!canAct} onClick={() => onExtend(client, extendDaysByClient[client.id] ?? 30)} title={`Extend ${extendDaysByClient[client.id] ?? 30} days`}>
                   <Timer size={16} />
                 </button>
                 <button className="icon-button" disabled={!canAct} onClick={() => onQr(client)} title="Show QR">

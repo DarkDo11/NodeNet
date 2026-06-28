@@ -19,7 +19,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const POLL_INTERVAL_MIN_SECS: u64 = 30;
+const POLL_INTERVAL_MIN_SECS: u64 = 2;
 const POLL_INTERVAL_DEFAULT_SECS: u64 = 30;
 const MAX_EVENTS: usize = 500;
 const EVENTS_APP_DIR: &str = "NodeNet";
@@ -91,6 +91,17 @@ pub async fn remove_events_for_server(app: &AppHandle, server_id: &str) -> Resul
         events.retain(|event| event.server_id.as_deref() != Some(server_id));
         events.iter().cloned().collect::<Vec<_>>()
     };
+
+    {
+        let state = app.state::<AlertsState>();
+        let mut runtime = state.runtime.lock().await;
+        runtime.down_servers.remove(server_id);
+        runtime.high_cpu_since.remove(server_id);
+        runtime.high_cpu_alerted.remove(server_id);
+        runtime
+            .limited_clients
+            .retain(|key| !key.starts_with(&format!("{server_id}:")));
+    }
 
     save_events(app, &snapshot).await
 }
@@ -172,7 +183,7 @@ async fn poll_server(app: &AppHandle, server: crate::config::ServerConfig) -> Re
             let state = app.state::<AlertsState>();
             let mut runtime = state.runtime.lock().await;
 
-            if sample.cpu_percent > 90.0 {
+            if sample.cpu_percent >= 90.0 {
                 let since = runtime
                     .high_cpu_since
                     .entry(server.id.clone())
@@ -217,7 +228,12 @@ async fn poll_server(app: &AppHandle, server: crate::config::ServerConfig) -> Re
             for client in clients {
                 let used = client.up.saturating_add(client.down);
                 let client_key = format!("{}:{}:{}", server.id, inbound.id, client.id);
-                let over_limit = client.total > 0 && (used as f64 / client.total as f64) >= 0.95;
+                let used_ratio = if client.total > 0 {
+                    used as f64 / client.total as f64
+                } else {
+                    0.0
+                };
+                let over_limit = used_ratio >= 0.95 && used_ratio <= 1.0;
                 let should_emit = {
                     let state = app.state::<AlertsState>();
                     let mut runtime = state.runtime.lock().await;
@@ -355,8 +371,11 @@ async fn save_events(app: &AppHandle, events: &[AlertEvent]) -> Result<()> {
         data: general_purpose::STANDARD.encode(ciphertext),
     };
 
-    fs::write(&path, serde_json::to_string_pretty(&encrypted)?)
-        .with_context(|| format!("failed to write events log {}", path.display()))
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&encrypted)?)
+        .with_context(|| format!("failed to write events log tmp {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to rename events log {}", path.display()))
 }
 
 async fn events_key(app: &AppHandle) -> Result<[u8; 32]> {

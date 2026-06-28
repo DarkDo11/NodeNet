@@ -99,29 +99,32 @@ export default function TerminalView({ server }: TerminalViewProps) {
     const observer = new ResizeObserver(resize);
     observer.observe(host);
 
-    const unlistenersPromise = Promise.all([
-      listen<TerminalOutputEvent>("terminal-output", (event) => {
-        if (event.payload.sessionId === sessionRef.current) {
-          terminal.write(event.payload.data);
-        }
-      }),
-      listen<TerminalStatusEvent>("terminal-status", (event) => {
-        if (event.payload.sessionId !== sessionRef.current) return;
-        setStatus(event.payload.status);
-        setMessage(event.payload.message);
-      }),
-    ]);
-
-    void unlistenersPromise.then(() => connect()).catch((error) => {
-      setStatus("reconnecting");
-      setMessage(error instanceof Error ? error.message : String(error));
+    const outputListenerPromise = listen<TerminalOutputEvent>("terminal-output", (event) => {
+      if (event.payload.sessionId === sessionRef.current) {
+        terminal.write(event.payload.data);
+      }
     });
+    const statusListenerPromise = listen<TerminalStatusEvent>("terminal-status", (event) => {
+      if (event.payload.sessionId !== sessionRef.current) return;
+      setStatus(event.payload.status);
+      setMessage(event.payload.message);
+    });
+
+    void Promise.all([outputListenerPromise, statusListenerPromise])
+      .then(() => connect())
+      .catch((error: unknown) => {
+        setStatus("reconnecting");
+        setMessage(error instanceof Error ? error.message : String(error));
+      });
 
     return () => {
       disposed = true;
       observer.disconnect();
       dataDisposable.dispose();
-      void unlistenersPromise.then((unlisteners) => unlisteners.forEach((unlisten) => unlisten()));
+      // Clean up each listener individually so a failure in one doesn't prevent
+      // the other from being unregistered.
+      void outputListenerPromise.then((unlisten) => unlisten()).catch(() => undefined);
+      void statusListenerPromise.then((unlisten) => unlisten()).catch(() => undefined);
       const sessionId = sessionRef.current;
       sessionRef.current = null;
       if (sessionId) {
@@ -131,7 +134,10 @@ export default function TerminalView({ server }: TerminalViewProps) {
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [server]);
+  // Depend only on stable identity fields — not the whole object, which can
+  // be recreated on config reload even if nothing meaningful changed.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server?.id, server?.host, server?.sshPort, server?.sshUser]);
 
   if (!server) {
     return (

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Clients from "./components/Clients";
 import ConfirmModal from "./components/ConfirmModal";
@@ -76,11 +77,11 @@ export default function App() {
     xrayConfigByServer,
     selectedInboundIdByServer,
     errorByServer: panelErrorByServer,
-    isLoadingInbounds,
-    isLoadingClients,
+    loadingInboundsById,
+    loadingClientsById,
     isLoadingXrayConfig,
     isSavingXrayConfig,
-    isRunningAction,
+    runningActionById,
     actionMessage,
     qrLink,
     qrTitle,
@@ -134,6 +135,10 @@ export default function App() {
       ]),
     ) as Record<string, MetricPoint | undefined>;
   }, [historyByServer]);
+
+  const isLoadingInbounds = selectedServerId ? (loadingInboundsById[selectedServerId] ?? false) : false;
+  const isLoadingClients = selectedServerId ? (loadingClientsById[selectedServerId] ?? false) : false;
+  const isRunningAction = selectedServerId ? (runningActionById[selectedServerId] ?? false) : false;
 
   const selectedInboundId = selectedServerId
     ? selectedInboundIdByServer[selectedServerId] ?? null
@@ -260,9 +265,11 @@ export default function App() {
     void loadXrayConfig(selectedServerId);
   }, [activeView, loadXrayConfig, selectedServer?.panelUrl, selectedServerId]);
 
+  const serverIds = servers.map((s) => s.id).join(",");
   useEffect(() => {
     if (servers.length > 0) void refreshGlobalStats(servers);
-  }, [servers, refreshGlobalStats]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverIds, refreshGlobalStats]);
 
   useEffect(() => {
     if (servers.length === 0) return;
@@ -271,12 +278,14 @@ export default function App() {
       Math.max(30, pollIntervalSec) * 1000,
     );
     return () => window.clearInterval(timer);
-  }, [pollIntervalSec, refreshGlobalStats, servers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollIntervalSec, refreshGlobalStats, serverIds]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
       if (!/^[1-9]$/.test(event.key)) return;
+      if (confirm !== null) return;
 
       const index = Number(event.key) - 1;
       const server = servers[index];
@@ -288,7 +297,14 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectServer, servers]);
+  }, [confirm, selectServer, servers]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<string>("tray-select-server", (event) => {
+      selectServer(event.payload);
+    });
+    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+  }, [selectServer]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {

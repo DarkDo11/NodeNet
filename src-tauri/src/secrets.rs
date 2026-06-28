@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 
-const SSH_SECRET_FIELDS: &[&str] = &["sshPassword", "sshPass", "ssh_password", "password"];
+const SSH_SECRET_FIELDS: &[&str] = &["sshPassword", "sshPass", "ssh_password"];
 const SSH_KEY_SECRET_FIELDS: &[&str] = &["sshKeyPassphrase", "ssh_key_passphrase"];
 const PANEL_SECRET_FIELDS: &[&str] = &[
     "panelPassword",
@@ -48,10 +48,14 @@ async fn migrate_file(app: &AppHandle, path: PathBuf) -> Result<()> {
                 continue;
             };
 
-            let server = serde_json::from_value::<config::ServerConfig>(Value::Object(
+            // Deserialize leniently — legacy configs may be missing optional fields.
+            // If parsing fails, skip this server's secrets rather than aborting migration.
+            let server = match serde_json::from_value::<config::ServerConfig>(Value::Object(
                 server_object.clone(),
-            ))
-            .context("failed to parse server while migrating secrets")?;
+            )) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
             if let Some(password) = take_first_string(server_object, SSH_SECRET_FIELDS) {
                 ssh::save_password(app, &server, &password).await?;
@@ -89,19 +93,17 @@ fn take_first_string(
     object: &mut serde_json::Map<String, Value>,
     fields: &[&str],
 ) -> Option<String> {
-    let mut found = None;
-    for field in fields {
-        if let Some(value) = object.remove(*field) {
-            if found.is_none() {
-                found = value
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned);
-            }
-        }
-    }
-    found
+    // Find the first matching field, then remove ONLY that field (not all aliases).
+    let key = fields
+        .iter()
+        .find(|&&field| object.contains_key(field))
+        .copied()?;
+    let value = object.remove(key)?;
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn remove_legacy_plaintext_file_if_empty() -> Result<()> {

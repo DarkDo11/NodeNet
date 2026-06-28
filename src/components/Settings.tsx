@@ -54,12 +54,12 @@ const emptyServer = (): ServerConfig => ({
   panelUrl: "",
   panelUser: "admin",
   sshKeyPath: "",
-  bastionHost: "",
-  bastionPort: 22,
-  bastionUser: "",
-  bastionSshKeyPath: "",
+  bastionHost: null,
+  bastionPort: null,
+  bastionUser: null,
+  bastionSshKeyPath: null,
   sshKeyPassphrase: null,
-  sslVerify: false,
+  sslVerify: true,
 });
 
 const slug = (value: string) =>
@@ -825,12 +825,12 @@ export default function Settings({
                 <span>Connect via bastion</span>
                 <input
                   type="checkbox"
-                  checked={Boolean(form.bastionHost)}
+                  checked={form.bastionHost !== null}
                   onChange={(event) => {
-                    updateForm("bastionHost", event.target.checked ? form.bastionHost || "" : null);
-                    updateForm("bastionPort", event.target.checked ? form.bastionPort || 22 : null);
-                    updateForm("bastionUser", event.target.checked ? form.bastionUser || form.sshUser : null);
-                    updateForm("bastionSshKeyPath", event.target.checked ? form.bastionSshKeyPath || "" : null);
+                    updateForm("bastionHost", event.target.checked ? form.bastionHost ?? "" : null);
+                    updateForm("bastionPort", event.target.checked ? form.bastionPort ?? 22 : null);
+                    updateForm("bastionUser", event.target.checked ? form.bastionUser ?? form.sshUser : null);
+                    updateForm("bastionSshKeyPath", event.target.checked ? form.bastionSshKeyPath ?? "" : null);
                   }}
                 />
               </label>

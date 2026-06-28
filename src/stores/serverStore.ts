@@ -24,6 +24,7 @@ interface ServerState {
   saveMonitorTarget: (target: { serverId: string | null; bastionId: string | null }) => Promise<void>;
   pingServer: (serverId: string) => Promise<void>;
   pingAllServers: () => Promise<void>;
+  _pingAllInFlight: boolean;
 }
 
 const applyConfig = (
@@ -82,6 +83,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   theme: "dark",
   isLoading: true,
   error: null,
+  _pingAllInFlight: false,
 
   loadServers: async () => {
     set({ isLoading: true, error: null });
@@ -167,7 +169,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   pingAllServers: async () => {
-    const { servers, pingServer } = get();
-    await Promise.allSettled(servers.map((server) => pingServer(server.id)));
+    if (get()._pingAllInFlight) return;
+    set({ _pingAllInFlight: true });
+    try {
+      const { servers, pingServer } = get();
+      await Promise.allSettled(servers.map((server) => pingServer(server.id)));
+    } finally {
+      set({ _pingAllInFlight: false });
+    }
   },
 }));

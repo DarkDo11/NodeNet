@@ -25,8 +25,12 @@ pub struct ServerConfig {
     pub bastion_ssh_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key_passphrase: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_ssl_verify")]
     pub ssl_verify: bool,
+}
+
+fn default_ssl_verify() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

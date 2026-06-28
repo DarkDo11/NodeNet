@@ -33,14 +33,16 @@ export const useEventsStore = create<EventsState>((set) => ({
       const events = await invoke<AlertEvent[]>("get_events");
       set((state) => {
         const knownIds = new Set(state.events.map((event) => event.id));
-        const newEvents = state.events.length > 0
-          ? events.filter((event) => !knownIds.has(event.id))
-          : [];
+        const toastIds = new Set(state.toasts.map((toast) => toast.id));
+        const newEvents = events.filter((event) => !knownIds.has(event.id));
+        const newToasts = newEvents
+          .filter((event) => !toastIds.has(event.id))
+          .map(toastFromEvent);
 
         return {
           events,
           error: null,
-          toasts: [...newEvents.map(toastFromEvent), ...state.toasts].slice(0, 5),
+          toasts: [...newToasts, ...state.toasts].slice(0, 5),
         };
       });
     } catch (error) {

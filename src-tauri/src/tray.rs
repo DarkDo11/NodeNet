@@ -1,5 +1,5 @@
 use crate::config;
-use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Manager};
+use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "nodenet-tray";
 
@@ -51,11 +51,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             } else if id == "quit" {
                 app.exit(0);
-            } else if id.starts_with("server-") {
+            } else if let Some(server_id) = id.strip_prefix("server-") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
+                let _ = app.emit("tray-select-server", server_id.to_string());
             }
         });
 

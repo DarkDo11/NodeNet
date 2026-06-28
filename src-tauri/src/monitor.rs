@@ -4,6 +4,7 @@ use crate::{
     ssh,
 };
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -383,6 +384,14 @@ async fn install_agent_with_servers(app: &AppHandle, servers: Vec<ServerConfig>)
     let temp_dir = std::env::temp_dir().join(format!("nodenet-monitor-{upload_id}"));
     fs::create_dir_all(&temp_dir)?;
 
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _temp_guard = TempDirGuard(temp_dir.clone());
+
     let agent_path = temp_dir.join("nodenet-monitor-agent.py");
     let config_path = temp_dir.join("config.json");
     let service_path = temp_dir.join("nodenet-monitor.service");
@@ -460,7 +469,6 @@ $SUDO systemctl status nodenet-monitor.service --no-pager --lines=0 || true
     );
 
     let output = ssh::execute_combined(app, &monitor, &install_command, 120).await?;
-    let _ = fs::remove_dir_all(temp_dir);
     Ok(output)
 }
 
@@ -832,7 +840,7 @@ METRICS_PATH = DATA_DIR / "metrics-cache.json"
 EVENTS_PATH = DATA_DIR / "events.json"
 RUNTIME_PATH = DATA_DIR / "runtime.json"
 MAX_EVENTS = 500
-MAX_POINTS_PER_SERVER = 50000
+MAX_POINTS_PER_SERVER = 20000
 
 METRICS_SCRIPT = r'''
 export LC_ALL=C
@@ -876,7 +884,7 @@ LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
 CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
 CPU_CORES=$(printf '%s\n' "$CPU_CORES" | awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1 > 0 {print $1}')
 if [ -z "$CPU_CORES" ]; then CPU_CORES=1; fi
-CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" 'BEGIN { if (cores <= 0 || load_value < 0) exit 1; printf "%.1f", (load_value / cores) * 100; }')
+CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" 'BEGIN { if (cores <= 0 || load_value < 0) exit 1; val = (load_value / cores) * 100; if (val > 100) val = 100; printf "%.1f", val; }')
 if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then CPU=; fi
 UPTIME_SEC=0
 if [ -r /proc/uptime ]; then
@@ -907,8 +915,6 @@ printf 'load_average=%s\n' "$LOAD_AVERAGE"
 printf 'uptime_sec=%s\n' "$UPTIME_SEC"
 printf 'rx_bytes=%s\n' "$RX_BYTES"
 printf 'tx_bytes=%s\n' "$TX_BYTES"
-printf 'total_rx_bytes=%s\n' "$RX_BYTES"
-printf 'total_tx_bytes=%s\n' "$TX_BYTES"
 GOOGLE_204_MS=
 if command -v curl >/dev/null 2>&1; then
   GOOGLE_204_MS=$(curl -o /dev/null -s -w '%{time_total}' --max-time 8 https://www.google.com/generate_204 2>/dev/null | awk '{ if ($1 ~ /^[0-9]+([.][0-9]+)?$/) printf "%.1f", $1 * 1000 }')
@@ -948,7 +954,8 @@ def parse_float(value, default=0.0):
 
 def parse_int(value, default=0):
     try:
-        return int(float(str(value).strip()))
+        s = str(value).strip()
+        return int(s) if s.lstrip("-").isdigit() else int(float(s))
     except Exception:
         return default
 
@@ -1003,7 +1010,7 @@ def parse_metrics(server_id, output, ping_ms):
         "totalRxBytes": total_rx,
         "totalTxBytes": total_tx,
         "totalTrafficBytes": total_rx + total_tx,
-        "pingMs": round_one(parse_float(values.get("google_204_ms"), ping_ms)) if values.get("google_204_ms") or ping_ms is not None else None,
+        "pingMs": round_one(parse_float(values.get("google_204_ms"))) if values.get("google_204_ms") else None,
         "isOnline": True,
     }
 
@@ -1156,7 +1163,7 @@ def main():
             fail_counts.pop(server_id, None)
             if server_id in down:
                 down.remove(server_id)
-            if point.get("cpuPercent", 0) > 90:
+            if point.get("cpuPercent", 0) >= 90:
                 high_since.setdefault(server_id, now)
                 if now - float(high_since.get(server_id) or now) >= 60 and server_id not in high_alerted:
                     high_alerted.add(server_id)
@@ -1167,10 +1174,8 @@ def main():
         else:
             fail_count = int(fail_counts.get(server_id) or 0) + 1
             fail_counts[server_id] = fail_count
-            if fail_count < 2:
-                continue
             point = offline_point(server_id, previous)
-            if server_id not in down:
+            if fail_count >= 2 and server_id not in down:
                 down.add(server_id)
                 push_event(events, "error", "server_down", server, f"{server.get('name')} is unavailable from monitor: {error}")
             high_since.pop(server_id, None)
@@ -1207,19 +1212,19 @@ pub async fn fetch_metrics_delta(app: &AppHandle, since: &HashMap<String, i64>) 
         return Ok(Value::Object(Default::default()));
     };
     let since_json = serde_json::to_string(since)?;
-    let command = delta_command(&since_json);
+    let since_b64 = STANDARD.encode(since_json.as_bytes());
+    let command = delta_command(&since_b64);
     let raw = ssh::execute(app, &monitor, &command).await?;
     Ok(parse_json_value_from_output(&raw, '{', '}')
         .unwrap_or_else(|| Value::Object(Default::default())))
 }
 
-fn delta_command(since_json: &str) -> String {
-    // Python script uses only double-quoted strings so it is safe inside the
-    // heredoc (no delimiter conflict) and the SINCE dict literal (JSON with
-    // integer values and double-quoted string keys) is valid Python syntax.
+fn delta_command(since_b64: &str) -> String {
+    // since_b64 is base64-encoded JSON — only [A-Za-z0-9+/=] chars,
+    // so it cannot escape the heredoc or inject Python code.
     format!(
         r#"python3 - <<'_NN_DELTA_'
-import json
+import json, base64
 from datetime import datetime, timezone
 
 def parse_ms(ts):
@@ -1229,7 +1234,7 @@ def parse_ms(ts):
     except Exception:
         return 0
 
-SINCE = {since}
+SINCE = json.loads(base64.b64decode(b"{since_b64}").decode())
 try:
     with open("/var/lib/nodenet-monitor/metrics-cache.json", "r", encoding="utf-8") as fh:
         cache = json.load(fh)
@@ -1247,6 +1252,6 @@ for sid, pts in (cache if isinstance(cache, dict) else {{}}).items():
 import sys
 sys.stdout.write(json.dumps(result, ensure_ascii=False))
 _NN_DELTA_"#,
-        since = since_json
+        since_b64 = since_b64
     )
 }

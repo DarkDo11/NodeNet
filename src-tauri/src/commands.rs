@@ -19,6 +19,7 @@ use crate::{
     },
     three_x_ui::{self, ThreeXClient, ThreeXInbound},
 };
+use reqwest;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -937,7 +938,13 @@ pub fn create_ssh_key_pair(server_id: String, key_name: String) -> Result<SshKey
     let key_name = sanitize_ssh_key_name(&key_name)?;
     let mut private_key_path = ssh_dir.join(&key_name);
     let mut index = 2;
+    const MAX_ATTEMPTS: u32 = 10_000;
     while private_key_path.exists() || public_key_path_for_private(&private_key_path).exists() {
+        if index > MAX_ATTEMPTS {
+            return Err(format!(
+                "Could not find a free key name in ~/.ssh/ after {MAX_ATTEMPTS} attempts"
+            ));
+        }
         private_key_path = ssh_dir.join(format!("{key_name}_{index}"));
         index += 1;
     }
@@ -1025,7 +1032,7 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
     // the previous session (written by save_metrics_cache).
     let path = metrics_cache_path().map_err(|e| e.to_string())?;
     let local_cache: Value = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
         serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()))
     } else {
         Value::Object(Default::default())
@@ -1096,13 +1103,20 @@ fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {
 
     for line in output.lines() {
         let lower = line.to_ascii_lowercase();
-        if lower.contains("port") {
+        // Match exact field names before the separator to avoid false positives
+        // (e.g. "user" matching "webUser" or "password" matching "webBasePath").
+        let key = lower
+            .split([':', '='])
+            .next()
+            .map(str::trim)
+            .unwrap_or("");
+        if matches!(key, "port" | "xui port" | "panel port" | "listen port") {
             port = port.or_else(|| first_u16(line));
         }
-        if lower.contains("username") || lower.contains("user") {
+        if matches!(key, "username" | "user" | "xui username" | "panel username") {
             username = username.or_else(|| value_after_separator(line));
         }
-        if lower.contains("password") || lower.contains("pass") {
+        if matches!(key, "password" | "pass" | "xui password" | "panel password") {
             password = password.or_else(|| value_after_separator(line));
         }
         if lower.contains("webbasepath") || lower.contains("web base path") {
@@ -1334,6 +1348,22 @@ fn validate_public_key_path(path: PathBuf) -> Result<PathBuf, String> {
     }
 
     Ok(path)
+}
+
+#[tauri::command]
+pub async fn get_public_ip() -> Result<String, String> {
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get("https://api.ipify.org")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .text()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(response.trim().to_string())
 }
 
 #[cfg(test)]

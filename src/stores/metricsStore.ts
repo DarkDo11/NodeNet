@@ -28,7 +28,7 @@ interface MetricsState {
 }
 
 const DAY_MS = 86_400_000;
-const MAX_HISTORY_MS = 5 * 365 * DAY_MS;
+const MAX_HISTORY_MS = 2 * 365 * DAY_MS;
 const RANGE_MS: Record<Exclude<MetricsRange, "all">, number> = {
   "1d": DAY_MS,
   "1w": 7 * DAY_MS,
@@ -258,8 +258,10 @@ const aggregatePoints = (points: MetricPoint[], bucketMs: number): MetricPoint[]
     .sort(([a], [b]) => a - b)
     .map(([timestamp, bucketPoints]) => {
       const onlinePoints = bucketPoints.filter((point) => point.isOnline);
-      const numericAverage = (selector: (point: MetricPoint) => number) =>
-        roundOne(bucketPoints.reduce((sum, point) => sum + selector(point), 0) / bucketPoints.length);
+      const numericAverage = (selector: (point: MetricPoint) => number) => {
+        const pts = onlinePoints.length > 0 ? onlinePoints : bucketPoints;
+        return roundOne(pts.reduce((sum, point) => sum + selector(point), 0) / pts.length);
+      };
       const pingValues = bucketPoints
         .map((point) => point.pingMs)
         .filter((value): value is number => typeof value === "number");
@@ -455,17 +457,16 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
         return;
       }
       const history = applyRetention([...previousHistory, point]);
-      const historyByServer = {
-        ...get().historyByServer,
-        [serverId]: history,
-      };
 
       set((state) => ({
         metricsByServer: {
           ...state.metricsByServer,
           [serverId]: metrics,
         },
-        historyByServer,
+        historyByServer: {
+          ...state.historyByServer,
+          [serverId]: history,
+        },
         errorByServer: {
           ...state.errorByServer,
           [serverId]: "",
@@ -475,7 +476,7 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
           [serverId]: metrics.isOnline === false ? offlineStrikes + 1 : 0,
         },
       }));
-      void invoke("save_metrics_cache", { cache: trimCache(historyByServer) });
+      void invoke("save_metrics_cache", { cache: trimCache(get().historyByServer) });
     } catch (error) {
       const previousHistory = get().historyByServer[serverId] ?? [];
       const previousPoint = previousHistory[previousHistory.length - 1];

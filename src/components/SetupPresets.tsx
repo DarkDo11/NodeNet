@@ -131,9 +131,8 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
   );
 
   useEffect(() => {
-    void fetch("https://api.ipify.org")
-      .then((response) => response.text())
-      .then((ip) => setManagementIp(ip.trim()))
+    void invoke<string>("get_public_ip")
+      .then((ip) => setManagementIp(ip))
       .catch(() => undefined);
     void invoke<string[]>("list_ssh_public_keys")
       .then((paths) => {
@@ -147,7 +146,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
     setNewKeyName(`nodenet_${server.id}_ed25519`);
   }, [server.id]);
 
-  const runPreset = async (preset: PresetItem, rethrow = false) => {
+  const runPreset = async (preset: PresetItem, rethrow = false, keepRunning = false) => {
     setError("");
     setMessage("");
     setRunning(preset.id);
@@ -181,7 +180,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
         throw error;
       }
     } finally {
-      setRunning(null);
+      if (!keepRunning) setRunning(null);
     }
   };
 
@@ -192,7 +191,7 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
     try {
       for (const preset of presets) {
         if (selected[preset.id]) {
-          await runPreset(preset, true);
+          await runPreset(preset, true, true);
         }
       }
       if (selected.install3xui) {
@@ -200,6 +199,8 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
       }
       setMessage("Selected setup presets finished");
       onDone?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(null);
     }

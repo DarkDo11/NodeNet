@@ -173,13 +173,13 @@ pub async fn save_credentials(
 
 pub async fn delete_credentials(app: &AppHandle, server: &ServerConfig) -> Result<()> {
     let account = keychain_account(server);
+    // Delete from primary service first.  If that fails for a real reason
+    // (not "not found"), propagate the error regardless of legacy outcome.
     let primary_result = keychain::delete_password(app, KEYCHAIN_SERVICE, &account).await;
     let legacy_result = keychain::delete_password(app, LEGACY_KEYCHAIN_SERVICE, &account).await;
 
-    match (primary_result, legacy_result) {
-        (Ok(()), _) | (_, Ok(())) => Ok(()),
-        (Err(primary_error), Err(_legacy_error)) => Err(primary_error),
-    }
+    primary_result?;
+    legacy_result
 }
 
 pub async fn read_saved_credentials(
@@ -423,7 +423,7 @@ pub async fn add_client(
     let inbound = get_raw_inbound(&mut session, inbound_id).await?;
     let client_id = Uuid::new_v4().to_string();
     let sub_id = Uuid::new_v4().simple().to_string();
-    let total_gb = if limit_gb <= 0.0 {
+    let total_gb = if limit_gb <= 0.0 || !limit_gb.is_finite() {
         0
     } else {
         (limit_gb * 1024.0 * 1024.0 * 1024.0).round() as u64
@@ -455,6 +455,14 @@ pub async fn add_client(
         "trojan" => {
             client["password"] = json!(client_id);
             client["flow"] = json!("");
+        }
+        "shadowsocks" => {
+            // Shadowsocks clients use email as identifier and inherit the
+            // inbound cipher+password — they have no per-client credentials.
+            bail!(
+                "Adding clients to a Shadowsocks inbound is not supported: \
+                 Shadowsocks inbounds share a single password defined on the inbound itself."
+            );
         }
         _ => {
             client["id"] = json!(client_id);
@@ -584,7 +592,11 @@ pub async fn extend_client(
     let mut client = find_client_value(&inbound, &client_id)?;
     let current_expiry = number_field(&client, "expiryTime").unwrap_or(0);
     let base_expiry = current_expiry.max(Utc::now().timestamp_millis());
-    client["expiryTime"] = json!(base_expiry + days * 86_400_000);
+    let delta_ms = days
+        .checked_mul(86_400_000)
+        .and_then(|d| base_expiry.checked_add(d))
+        .ok_or_else(|| anyhow::anyhow!("days value too large, would overflow expiry timestamp"))?;
+    client["expiryTime"] = json!(delta_ms);
 
     let settings = json!({ "clients": [client.clone()] });
     let payload = json!({
@@ -1304,9 +1316,23 @@ async fn fetch_csrf_token(
 }
 
 fn csrf_token_from_html(html: &str) -> Option<String> {
-    let marker = r#"name="csrf-token" content=""#;
-    let start = html.find(marker)? + marker.len();
-    let end = html[start..].find('"')?;
+    // Try double-quoted form first, then single-quoted.
+    let (start, closing_quote) = if let Some(pos) = html.find(r#"name="csrf-token" content=""#) {
+        let marker = r#"name="csrf-token" content=""#;
+        (pos + marker.len(), '"')
+    } else if let Some(pos) = html.find("name=\"csrf-token\" content='") {
+        let marker = "name=\"csrf-token\" content='";
+        (pos + marker.len(), '\'')
+    } else if let Some(pos) = html.find("name='csrf-token' content=\"") {
+        let marker = "name='csrf-token' content=\"";
+        (pos + marker.len(), '"')
+    } else if let Some(pos) = html.find("name='csrf-token' content='") {
+        let marker = "name='csrf-token' content='";
+        (pos + marker.len(), '\'')
+    } else {
+        return None;
+    };
+    let end = html[start..].find(closing_quote)?;
     let token = html[start..start + end].trim();
     if token.is_empty() {
         None
@@ -1399,7 +1425,18 @@ fn map_clients(raw: &RawInbound) -> Vec<ThreeXClient> {
             let up = traffic.map(|item| item.up).unwrap_or(0);
             let down = traffic.map(|item| item.down).unwrap_or(0);
             let total = number_field(&client, "totalGB")
-                .map(|value| value.max(0) as u64)
+                .map(|value| {
+                    let raw = value.max(0) as u64;
+                    // Older panel versions store limit in actual GB; newer ones
+                    // (and our own add_client) store bytes.  Values under 1 000 are
+                    // almost certainly in GB — the smallest sensible byte limit
+                    // would be a few MB at minimum.
+                    if raw > 0 && raw < 1_000 {
+                        raw * 1_073_741_824
+                    } else {
+                        raw
+                    }
+                })
                 .or_else(|| traffic.map(|item| item.total))
                 .unwrap_or(0);
             let expiry_time = number_field(&client, "expiryTime")
@@ -1566,7 +1603,7 @@ fn default_flow(inbound: &RawInbound) -> String {
     settings_clients(&inbound.settings)
         .unwrap_or_default()
         .into_iter()
-        .find_map(|client| string_field(&client, "flow"))
+        .find_map(|client| string_field(&client, "flow").filter(|s| !s.is_empty()))
         .unwrap_or_default()
 }
 
@@ -1761,7 +1798,15 @@ fn normalize_panel_url(url: &str) -> Result<String> {
 }
 
 fn panel_base_path(path: &str) -> String {
-    let Some(index) = path.find("/panel") else {
+    // Match "/panel" only as a path component: at end or followed by "/".
+    let index = path
+        .find("/panel/")
+        .or_else(|| {
+            path.rfind("/panel")
+                .filter(|&i| i + "/panel".len() == path.len())
+        });
+
+    let Some(index) = index else {
         return path.trim_end_matches('/').to_string();
     };
 
