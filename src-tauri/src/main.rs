@@ -6,6 +6,7 @@ mod metrics;
 mod monitor;
 mod secrets;
 mod ssh;
+mod ssl;
 mod terminal;
 mod three_x_ui;
 mod tray;
@@ -108,6 +109,7 @@ fn main() {
             commands::load_metrics_cache,
             commands::save_metrics_cache,
             commands::get_public_ip,
+            commands::list_ssl_certificates,
             tray::rebuild_tray,
             terminal::terminal_connect,
             terminal::terminal_input,

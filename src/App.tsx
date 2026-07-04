@@ -12,6 +12,7 @@ import QrModal from "./components/QrModal";
 import RoutingEditor from "./components/RoutingEditor";
 import Settings from "./components/Settings";
 import Sidebar, { type AppView } from "./components/Sidebar";
+import SslCertificates from "./components/SslCertificates";
 import TerminalView from "./components/TerminalView";
 import ToastHost from "./components/ToastHost";
 import Topbar from "./components/Topbar";
@@ -553,6 +554,7 @@ export default function App() {
               selectedServerId={selectedServerId}
             />
           ) : null}
+          {!showOnboarding && activeView === "ssl" ? <SslCertificates servers={servers} /> : null}
           {!showOnboarding && activeView === "settings" ? (
             <Settings
               servers={servers}

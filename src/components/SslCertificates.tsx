@@ -1,0 +1,241 @@
+import { useEffect, useMemo, useState } from "react";
+import { KeyRound, RefreshCw } from "lucide-react";
+import type { ServerConfig } from "../types";
+import { useSslStore, type SslCertificateRow } from "../stores/sslStore";
+import CommandOutputModal from "./CommandOutputModal";
+import ConfirmModal from "./ConfirmModal";
+
+interface SslCertificatesProps {
+  servers: ServerConfig[];
+}
+
+const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+const renewCommand = (certName: string) => {
+  const name = shellQuote(certName);
+  return [
+    `UFW_ACTIVE=0; OPENED_PORT80=0`,
+    `if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then`,
+    `  UFW_ACTIVE=1`,
+    `  if ! ufw status | grep -qE '^80(/tcp)?[[:space:]]+ALLOW'; then`,
+    `    ufw allow 80/tcp >/dev/null 2>&1 && OPENED_PORT80=1`,
+    `  fi`,
+    `fi`,
+    `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
+    `  certbot renew --cert-name ${name} --nginx --non-interactive --force-renewal`,
+    `else`,
+    `  certbot renew --cert-name ${name} --standalone --non-interactive --force-renewal`,
+    `fi`,
+    `RENEW_STATUS=$?`,
+    `if [ "$OPENED_PORT80" = "1" ]; then`,
+    `  ufw delete allow 80/tcp >/dev/null 2>&1 || true`,
+    `fi`,
+    `exit $RENEW_STATUS`,
+  ].join("\n");
+};
+
+const installCertbotCommand = [
+  `[ "$(id -u)" = "0" ] || SUDO=sudo`,
+  `if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y certbot python3-certbot-nginx`,
+  `elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y certbot python3-certbot-nginx`,
+  `elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y certbot python3-certbot-nginx`,
+  `else echo "Unsupported package manager" >&2; exit 1`,
+  `fi`,
+].join("\n");
+
+const formatDate = (value: string | null) =>
+  value
+    ? new Date(value).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" })
+    : "--";
+
+const statusClass = (status: SslCertificateRow["status"]) => {
+  if (status === "valid") return "status-label active";
+  if (status === "expiring") return "status-label warn";
+  if (status === "expired") return "status-label error";
+  return "status-label";
+};
+
+const statusLabel = (status: SslCertificateRow["status"], expiresAt: string | null) => {
+  if (status === "expired") return "expired";
+  if (status === "expiring") {
+    const days = expiresAt
+      ? Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86_400_000))
+      : null;
+    return days !== null ? `expires in ${days}d` : "expiring";
+  }
+  if (status === "valid") return "valid";
+  return "unknown";
+};
+
+export default function SslCertificates({ servers }: SslCertificatesProps) {
+  const { certificates, certbotInstalledByServer, errorByServer, isLoading, loadAllCertificates } =
+    useSslStore();
+  const [pendingRenew, setPendingRenew] = useState<
+    { serverId: string; serverName: string; certName: string } | null
+  >(null);
+  const [streamingOutput, setStreamingOutput] = useState<
+    { title: string; serverId: string; command: string } | null
+  >(null);
+
+  const serverIds = servers.map((server) => server.id).join(",");
+  useEffect(() => {
+    if (servers.length > 0) void loadAllCertificates(servers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverIds]);
+
+  const serversWithoutCerts = useMemo(
+    () =>
+      servers.filter(
+        (server) =>
+          !certificates.some((cert) => cert.serverId === server.id) && !errorByServer[server.id],
+      ),
+    [servers, certificates, errorByServer],
+  );
+
+  const refresh = () => void loadAllCertificates(servers);
+
+  return (
+    <main className="content">
+      <header className="dashboard-header">
+        <div>
+          <p className="eyebrow">SSL</p>
+          <h2>Certificates</h2>
+          <span className="server-target">
+            {certificates.length} certificate(s) across {servers.length} server(s)
+          </span>
+        </div>
+        <div className="header-actions">
+          <button className="command-button" disabled={isLoading} onClick={refresh}>
+            <RefreshCw size={16} className={isLoading ? "spin" : ""} />
+            <span>Refresh</span>
+          </button>
+        </div>
+      </header>
+
+      {Object.entries(errorByServer).map(([serverId, message]) => (
+        <div className="error-state" key={serverId}>
+          <div>
+            <strong>{servers.find((server) => server.id === serverId)?.name ?? serverId}</strong>
+            <span>{message}</span>
+          </div>
+        </div>
+      ))}
+
+      <section className="inbounds-panel">
+        <div className="ssl-table header">
+          <span>Server</span>
+          <span>Domain(s)</span>
+          <span>Issuer</span>
+          <span>Issued</span>
+          <span>Expires</span>
+          <span>Status</span>
+          <span>Action</span>
+        </div>
+
+        {isLoading && certificates.length === 0
+          ? Array.from({ length: 4 }, (_, index) => (
+              <div key={index} className="ssl-table row skeleton-row">
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line" />
+              </div>
+            ))
+          : certificates.map((cert) => (
+              <div className="ssl-table row" key={`${cert.serverId}:${cert.certName}`}>
+                <span>{cert.serverName}</span>
+                <span title={cert.domains.join(", ")}>
+                  {cert.domains[0]}
+                  {cert.domains.length > 1 ? ` +${cert.domains.length - 1}` : ""}
+                </span>
+                <span>{cert.issuer || "--"}</span>
+                <span>{formatDate(cert.issuedAt)}</span>
+                <span>{formatDate(cert.expiresAt)}</span>
+                <span className={statusClass(cert.status)}>
+                  {statusLabel(cert.status, cert.expiresAt)}
+                </span>
+                <span>
+                  <button
+                    className="command-button"
+                    onClick={() =>
+                      setPendingRenew({
+                        serverId: cert.serverId,
+                        serverName: cert.serverName,
+                        certName: cert.certName,
+                      })
+                    }
+                  >
+                    <RefreshCw size={14} />
+                    <span>Renew</span>
+                  </button>
+                </span>
+              </div>
+            ))}
+
+        {serversWithoutCerts.map((server) => (
+          <div className="ssl-table row" key={server.id}>
+            <span>{server.name}</span>
+            <span>No certificates found</span>
+            <span />
+            <span />
+            <span />
+            <span />
+            <span>
+              {certbotInstalledByServer[server.id] === false ? (
+                <button
+                  className="command-button"
+                  onClick={() =>
+                    setStreamingOutput({
+                      title: `Install certbot on ${server.name}`,
+                      serverId: server.id,
+                      command: installCertbotCommand,
+                    })
+                  }
+                >
+                  <KeyRound size={14} />
+                  <span>Install certbot</span>
+                </button>
+              ) : null}
+            </span>
+          </div>
+        ))}
+
+        {!isLoading && certificates.length === 0 && servers.length === 0 ? (
+          <div className="empty-state table-empty">
+            <span>Add a server to see its certificates</span>
+          </div>
+        ) : null}
+      </section>
+
+      {pendingRenew ? (
+        <ConfirmModal
+          title={`Renew ${pendingRenew.certName}?`}
+          message={`This forces a renewal on ${pendingRenew.serverName} via certbot, which counts against Let's Encrypt's weekly rate limit. If nginx is running, the --nginx plugin is used with no downtime; otherwise certbot falls back to --standalone.`}
+          confirmLabel="Renew certificate"
+          onCancel={() => setPendingRenew(null)}
+          onConfirm={() => {
+            setStreamingOutput({
+              title: `Renew ${pendingRenew.certName}`,
+              serverId: pendingRenew.serverId,
+              command: renewCommand(pendingRenew.certName),
+            });
+            setPendingRenew(null);
+          }}
+        />
+      ) : null}
+
+      {streamingOutput ? (
+        <CommandOutputModal
+          title={streamingOutput.title}
+          serverId={streamingOutput.serverId}
+          command={streamingOutput.command}
+          onClose={() => setStreamingOutput(null)}
+          onComplete={() => void loadAllCertificates(servers)}
+        />
+      ) : null}
+    </main>
+  );
+}

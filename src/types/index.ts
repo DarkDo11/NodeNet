@@ -220,3 +220,19 @@ export interface CommandOutputEvent {
   line: string;
   done: boolean;
 }
+
+export type SslCertificateStatus = "valid" | "expiring" | "expired" | "unknown";
+
+export interface SslCertificate {
+  certName: string;
+  domains: string[];
+  issuer: string;
+  issuedAt: string | null;
+  expiresAt: string | null;
+  status: SslCertificateStatus;
+}
+
+export interface ServerCertificates {
+  certbotInstalled: boolean;
+  certificates: SslCertificate[];
+}

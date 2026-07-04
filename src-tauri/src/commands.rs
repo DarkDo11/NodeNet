@@ -11,6 +11,7 @@ use crate::{
     },
     metrics::{collect, ServerMetrics},
     monitor,
+    ssl,
     ssh::{
         self, delete_bastion_password as delete_bastion_password_secret, delete_key_passphrase,
         delete_password, ping, read_saved_key_passphrase,
@@ -648,6 +649,17 @@ pub async fn run_streaming_command(
 }
 
 #[tauri::command]
+pub async fn list_ssl_certificates(
+    app: AppHandle,
+    server_id: String,
+) -> Result<ssl::ServerCertificates, String> {
+    let server = find_server(&server_id).map_err(|error| error.to_string())?;
+    ssl::list_certificates(&app, &server)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_remote_logs(
     app: AppHandle,
     target_kind: String,
@@ -1022,8 +1034,19 @@ async fn write_metrics_cache(cache: &Value) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    let raw = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, raw).await.map_err(|e| e.to_string())
+    // Compact (not pretty-printed): this file is machine-only and can grow to
+    // tens of MB across months of history, so skipping indentation whitespace
+    // meaningfully cuts disk I/O and IPC transfer time on every load/save.
+    let raw = serde_json::to_string(cache).map_err(|e| e.to_string())?;
+    // Write-then-rename so a crash mid-write can never leave a truncated,
+    // unparseable cache file behind (rename is atomic on the same filesystem).
+    let tmp_path = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp_path, &raw)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1033,7 +1056,19 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
     let path = metrics_cache_path().map_err(|e| e.to_string())?;
     let local_cache: Value = if path.exists() {
         let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()))
+        match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(e) => {
+                let _ = app.emit(
+                    "alert-error",
+                    format!(
+                        "metrics cache at {} was corrupted and could not be loaded ({e}); starting from empty history",
+                        path.display()
+                    ),
+                );
+                Value::Object(Default::default())
+            }
+        }
     } else {
         Value::Object(Default::default())
     };
@@ -1090,8 +1125,10 @@ fn remove_server_from_metrics_cache(server_id: &str) -> anyhow::Result<()> {
     if let Some(object) = cache.as_object_mut() {
         object.remove(server_id);
     }
-    let raw = serde_json::to_string_pretty(&cache)?;
-    fs::write(path, raw)?;
+    let raw = serde_json::to_string(&cache)?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, raw)?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -1265,6 +1302,22 @@ fn first_u16(line: &str) -> Option<u16> {
 ///
 /// Handles both ISO-8601 string timestamps (monitor format) and numeric
 /// epoch-ms timestamps (frontend MetricPoint format saved to local disk).
+/// Matches the remote monitor agent's own retention cap (see
+/// `MAX_POINTS_PER_SERVER` in `monitor.rs`'s embedded Python agent) so the
+/// local delta-merged cache can't grow unbounded between app restarts.
+const MAX_POINTS_PER_SERVER: usize = 20_000;
+
+fn point_timestamp_ms(point: &Value) -> Option<i64> {
+    let ts = point.get("timestamp")?;
+    if let Some(n) = ts.as_i64() {
+        // Epoch seconds (< 10^10) vs epoch milliseconds.
+        return Some(if n < 10_000_000_000 { n * 1000 } else { n });
+    }
+    ts.as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp_millis())
+}
+
 fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
     let mut since = HashMap::new();
     let Some(obj) = cache.as_object() else {
@@ -1276,16 +1329,7 @@ fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
         };
         let latest_ms = arr
             .iter()
-            .filter_map(|point| {
-                let ts = point.get("timestamp")?;
-                if let Some(n) = ts.as_i64() {
-                    // Epoch seconds (< 10^10) vs epoch milliseconds.
-                    return Some(if n < 10_000_000_000 { n * 1000 } else { n });
-                }
-                ts.as_str()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.timestamp_millis())
-            })
+            .filter_map(point_timestamp_ms)
             .max()
             .unwrap_or(0);
         since.insert(server_id.clone(), latest_ms);
@@ -1295,6 +1339,8 @@ fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
 
 /// Append new points from `delta` into `base`.  Duplicate-free by design:
 /// `fetch_metrics_delta` uses a strict `>` cutoff so delta never overlaps base.
+/// Each server's array is re-sorted and capped at `MAX_POINTS_PER_SERVER` so
+/// repeated merges across restarts can't grow the on-disk cache without bound.
 fn merge_cache_delta(base: &mut Value, delta: Value) {
     let (Some(base_obj), Some(delta_obj)) = (base.as_object_mut(), delta.as_object()) else {
         return;
@@ -1311,6 +1357,11 @@ fn merge_cache_delta(base: &mut Value, delta: Value) {
             .or_insert_with(|| Value::Array(vec![]));
         if let Some(existing) = entry.as_array_mut() {
             existing.extend(new_arr.iter().cloned());
+            existing.sort_by_key(|p| point_timestamp_ms(p).unwrap_or(0));
+            if existing.len() > MAX_POINTS_PER_SERVER {
+                let excess = existing.len() - MAX_POINTS_PER_SERVER;
+                existing.drain(0..excess);
+            }
         }
     }
 }

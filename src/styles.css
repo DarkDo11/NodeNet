@@ -1594,6 +1594,33 @@ code {
   background: rgba(255, 255, 255, 0.06);
 }
 
+.ssl-table {
+  display: grid;
+  grid-template-columns: 0.9fr 1.4fr 1.2fr 0.8fr 0.8fr 0.9fr 0.9fr;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.ssl-table.header {
+  min-height: 42px;
+  padding: 0 14px;
+  color: var(--faint);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.ssl-table.row {
+  min-height: 58px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 14px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
 .status-label {
   display: inline-flex;
   width: fit-content;

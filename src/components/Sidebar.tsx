@@ -2,6 +2,7 @@ import {
   Activity,
   Gauge,
   HardDrive,
+  Lock,
   Network,
   Route,
   ScrollText,
@@ -14,7 +15,16 @@ import { AnimatePresence, motion } from "framer-motion";
 import CountryFlag from "./CountryFlag";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
-export type AppView = "dashboard" | "inbounds" | "clients" | "routing" | "terminal" | "events" | "logs" | "settings";
+export type AppView =
+  | "dashboard"
+  | "inbounds"
+  | "clients"
+  | "routing"
+  | "terminal"
+  | "events"
+  | "logs"
+  | "ssl"
+  | "settings";
 
 interface SidebarProps {
   servers: ServerConfig[];
@@ -103,6 +113,14 @@ export default function Sidebar({
         >
           <ScrollText size={16} />
           <span>Logs</span>
+        </button>
+        <button
+          className={activeView === "ssl" ? "nav-tab active" : "nav-tab"}
+          onClick={() => onChangeView("ssl")}
+          title="SSL"
+        >
+          <Lock size={16} />
+          <span>SSL</span>
         </button>
         <button
           className={activeView === "settings" ? "nav-tab active" : "nav-tab"}
