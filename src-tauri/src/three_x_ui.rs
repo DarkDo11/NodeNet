@@ -210,6 +210,43 @@ pub async fn get_inbounds(app: &AppHandle, server: &ServerConfig) -> Result<Vec<
     Ok(raw.iter().map(map_inbound).collect())
 }
 
+/// Certificate files the panel's inbounds actually point Xray at (from each
+/// inbound's `tlsSettings`/`xtlsSettings`), regardless of where they live on
+/// disk. The panel's own "Apply" cert feature (acme.sh) commonly stores certs
+/// outside `/etc/letsencrypt/live/`, so this is how the SSL tab finds those
+/// too, not just plain Certbot installs.
+pub async fn get_inbound_certificate_paths(
+    app: &AppHandle,
+    server: &ServerConfig,
+) -> Result<Vec<String>> {
+    let mut session = PanelSession::for_server(app, server).await?;
+    let raw = get_raw_inbounds(&mut session).await?;
+
+    let mut paths = Vec::new();
+    for inbound in &raw {
+        let stream = parse_json_object(&inbound.stream_settings).unwrap_or_else(|| json!({}));
+        for settings_key in ["tlsSettings", "xtlsSettings"] {
+            let Some(certs) = stream
+                .pointer(&format!("/{settings_key}/certificates"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for cert in certs {
+                if let Some(file) = cert.get("certificateFile").and_then(Value::as_str) {
+                    let trimmed = file.trim();
+                    if !trimmed.is_empty() {
+                        paths.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 pub async fn get_xray_config(app: &AppHandle, server: &ServerConfig) -> Result<Value> {
     let mut session = PanelSession::for_server(app, server).await?;
     Ok(get_xray_panel_settings(&mut session).await?.config)
