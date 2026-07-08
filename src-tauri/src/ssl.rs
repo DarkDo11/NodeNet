@@ -17,11 +17,20 @@ report_cert() {
   name="$1"
   cert="$2"
   [ -f "$cert" ] || return
-  domains=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null | grep -o 'DNS:[^,]*' | sed 's/DNS://g' | tr '\n' ' ' | sed 's/ *$//')
+  case "$cert" in
+    /etc/letsencrypt/*) source_tag="certbot" ;;
+    /root/cert/*) source_tag="acmeSh" ;;
+    *) source_tag="unknown" ;;
+  esac
+  # Include IP-address SANs too, not just DNS names — 3x-ui's IP-address
+  # certs (issued via the x-ui CLI, see /root/cert/ip below) have no domain
+  # at all, so without this the identifier acme.sh needs to renew them is
+  # silently lost and the UI falls back to a useless directory-name guess.
+  domains=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null | grep -oE '(DNS|IP Address):[^,]*' | sed -E 's/^(DNS|IP Address)://' | tr '\n' ' ' | sed 's/ *$//')
   issuer=$(openssl x509 -in "$cert" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
   startdate=$(openssl x509 -in "$cert" -noout -startdate 2>/dev/null | sed 's/^notBefore=//')
   enddate=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
-  printf 'CERT\t%s\t%s\t%s\t%s\t%s\n' "$name" "$domains" "$issuer" "$startdate" "$enddate"
+  printf 'CERT\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$domains" "$issuer" "$startdate" "$enddate" "$source_tag"
 }
 for d in /etc/letsencrypt/live/*/; do
   [ -d "$d" ] || continue
@@ -92,6 +101,11 @@ pub struct SslCertificate {
     pub expires_at: Option<DateTime<Utc>>,
     /// "valid" | "expiring" | "expired" | "unknown" (unparseable expiry date)
     pub status: String,
+    /// "certbot" | "acmeSh" | "unknown" — which client manages this cert,
+    /// determined from the file path it was found at. Renewal must be
+    /// dispatched to the matching client; certbot has no record of an
+    /// acme.sh-issued cert (and vice versa).
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,7 +171,7 @@ pub async fn list_certificates(app: &AppHandle, server: &ServerConfig) -> Result
             None => continue,
         };
         let fields: Vec<&str> = rest.split('\t').collect();
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             continue;
         }
 
@@ -173,6 +187,12 @@ pub async fn list_certificates(app: &AppHandle, server: &ServerConfig) -> Result
         let issued_at = parse_openssl_date(fields[3]);
         let expires_at = parse_openssl_date(fields[4]);
         let status = status_for(issued_at, expires_at);
+        let source = match fields[5].trim() {
+            "certbot" => "certbot",
+            "acmeSh" => "acmeSh",
+            _ => "unknown",
+        }
+        .to_string();
 
         certificates.push(SslCertificate {
             cert_name,
@@ -181,6 +201,7 @@ pub async fn list_certificates(app: &AppHandle, server: &ServerConfig) -> Result
             issued_at,
             expires_at,
             status,
+            source,
         });
     }
 

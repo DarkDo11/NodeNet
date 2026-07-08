@@ -11,27 +11,48 @@ interface SslCertificatesProps {
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
-const renewCommand = (certName: string) => {
-  const name = shellQuote(certName);
-  return [
-    `UFW_ACTIVE=0; OPENED_PORT80=0`,
-    `if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then`,
-    `  UFW_ACTIVE=1`,
-    `  if ! ufw status | grep -qE '^80(/tcp)?[[:space:]]+ALLOW'; then`,
-    `    ufw allow 80/tcp >/dev/null 2>&1 && OPENED_PORT80=1`,
-    `  fi`,
-    `fi`,
+const ufwOpenPreamble = [
+  `UFW_ACTIVE=0; OPENED_PORT80=0`,
+  `if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then`,
+  `  UFW_ACTIVE=1`,
+  `  if ! ufw status | grep -qE '^80(/tcp)?[[:space:]]+ALLOW'; then`,
+  `    ufw allow 80/tcp >/dev/null 2>&1 && OPENED_PORT80=1`,
+  `  fi`,
+  `fi`,
+];
+
+const ufwClosePostamble = [
+  `RENEW_STATUS=$?`,
+  `if [ "$OPENED_PORT80" = "1" ]; then`,
+  `  ufw delete allow 80/tcp >/dev/null 2>&1 || true`,
+  `fi`,
+  `exit $RENEW_STATUS`,
+];
+
+// Certbot has no record of an acme.sh-issued cert and vice versa (3x-ui's
+// own CLI issues IP/domain certs via acme.sh straight to /root/cert/, not
+// through certbot) — renewal must be dispatched to whichever client
+// actually manages the cert, identified server-side by its file path.
+const renewCommand = (cert: SslCertificateRow) => {
+  if (cert.source === "acmeSh") {
+    // acme.sh's own identifier is the domain/IP passed at issuance (`-d`),
+    // which for 3x-ui's IP-cert flow is the real IP, not the "ip" folder
+    // name — so use the SAN we parsed rather than certName.
+    const domain = shellQuote(cert.domains[0] ?? cert.certName);
+    return [...ufwOpenPreamble, `~/.acme.sh/acme.sh --renew -d ${domain} --force`, ...ufwClosePostamble].join(
+      "\n",
+    );
+  }
+
+  const name = shellQuote(cert.certName);
+  const renewStep = [
     `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
     `  certbot renew --cert-name ${name} --nginx --non-interactive --force-renewal`,
     `else`,
     `  certbot renew --cert-name ${name} --standalone --non-interactive --force-renewal`,
     `fi`,
-    `RENEW_STATUS=$?`,
-    `if [ "$OPENED_PORT80" = "1" ]; then`,
-    `  ufw delete allow 80/tcp >/dev/null 2>&1 || true`,
-    `fi`,
-    `exit $RENEW_STATUS`,
-  ].join("\n");
+  ];
+  return [...ufwOpenPreamble, ...renewStep, ...ufwClosePostamble].join("\n");
 };
 
 const installCertbotCommand = [
@@ -70,9 +91,7 @@ const statusLabel = (status: SslCertificateRow["status"], expiresAt: string | nu
 export default function SslCertificates({ servers }: SslCertificatesProps) {
   const { certificates, certbotInstalledByServer, errorByServer, isLoading, loadAllCertificates } =
     useSslStore();
-  const [pendingRenew, setPendingRenew] = useState<
-    { serverId: string; serverName: string; certName: string } | null
-  >(null);
+  const [pendingRenew, setPendingRenew] = useState<SslCertificateRow | null>(null);
   const [streamingOutput, setStreamingOutput] = useState<
     { title: string; serverId: string; command: string } | null
   >(null);
@@ -158,19 +177,19 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
                   {statusLabel(cert.status, cert.expiresAt)}
                 </span>
                 <span>
-                  <button
-                    className="command-button"
-                    onClick={() =>
-                      setPendingRenew({
-                        serverId: cert.serverId,
-                        serverName: cert.serverName,
-                        certName: cert.certName,
-                      })
-                    }
-                  >
-                    <RefreshCw size={14} />
-                    <span>Renew</span>
-                  </button>
+                  {cert.source === "unknown" ? (
+                    <span
+                      className="muted-note"
+                      title="This certificate wasn't found under Certbot or acme.sh (3x-ui's CLI) — its origin is unknown, so automatic renewal isn't safe to offer. Renew it manually."
+                    >
+                      Manual renewal only
+                    </span>
+                  ) : (
+                    <button className="command-button" onClick={() => setPendingRenew(cert)}>
+                      <RefreshCw size={14} />
+                      <span>Renew</span>
+                    </button>
+                  )}
                 </span>
               </div>
             ))}
@@ -213,14 +232,18 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
       {pendingRenew ? (
         <ConfirmModal
           title={`Renew ${pendingRenew.certName}?`}
-          message={`This forces a renewal on ${pendingRenew.serverName} via certbot, which counts against Let's Encrypt's weekly rate limit. If nginx is running, the --nginx plugin is used with no downtime; otherwise certbot falls back to --standalone.`}
+          message={
+            pendingRenew.source === "acmeSh"
+              ? `This forces a renewal on ${pendingRenew.serverName} via acme.sh (the client 3x-ui's own SSL menu uses), which counts against Let's Encrypt's weekly rate limit.`
+              : `This forces a renewal on ${pendingRenew.serverName} via certbot, which counts against Let's Encrypt's weekly rate limit. If nginx is running, the --nginx plugin is used with no downtime; otherwise certbot falls back to --standalone.`
+          }
           confirmLabel="Renew certificate"
           onCancel={() => setPendingRenew(null)}
           onConfirm={() => {
             setStreamingOutput({
               title: `Renew ${pendingRenew.certName}`,
               serverId: pendingRenew.serverId,
-              command: renewCommand(pendingRenew.certName),
+              command: renewCommand(pendingRenew),
             });
             setPendingRenew(null);
           }}

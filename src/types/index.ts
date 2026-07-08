@@ -222,6 +222,7 @@ export interface CommandOutputEvent {
 }
 
 export type SslCertificateStatus = "valid" | "expiring" | "expired" | "unknown";
+export type SslCertificateSource = "certbot" | "acmeSh" | "unknown";
 
 export interface SslCertificate {
   certName: string;
@@ -230,6 +231,7 @@ export interface SslCertificate {
   issuedAt: string | null;
   expiresAt: string | null;
   status: SslCertificateStatus;
+  source: SslCertificateSource;
 }
 
 export interface ServerCertificates {
