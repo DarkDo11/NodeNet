@@ -29,6 +29,37 @@ for d in /etc/letsencrypt/live/*/; do
   [ "$name" = "README" ] && continue
   report_cert "$name" "${d}cert.pem"
 done
+# 3x-ui's own CLI (x-ui menu 20 -> "Get SSL (Domain)" / "Get SSL for IP
+# Address") issues certs via acme.sh straight to /root/cert/<domain-or-"ip">/,
+# independent of whether that cert was ever registered as the panel's active
+# cert (that's an extra confirmation step in the CLI flow) — so check here
+# even if the settings-table lookup below finds nothing.
+for d in /root/cert/*/; do
+  [ -d "$d" ] || continue
+  name=$(basename "$d")
+  report_cert "$name" "${d}fullchain.pem"
+done
+# 3x-ui v3+: the panel's own web UI cert and the subscription-link server's
+# cert (Panel Settings > Panel Certificate / Subscription Certificate) live
+# as plain rows in its settings table, not under any Xray inbound, so pull
+# them out directly if the panel's local DB is present.
+if command -v sqlite3 >/dev/null 2>&1 && [ -f /etc/x-ui/x-ui.db ]; then
+  sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key IN ('webCertFile','subCertFile') AND value != '';" 2>/dev/null | while IFS= read -r p; do
+    [ -n "$p" ] && report_cert "$(basename "$(dirname "$p")")" "$p"
+  done
+fi
+# Panels reached only by bare IP have no domain to issue a CA cert for, so
+# they're commonly reverse-proxied behind nginx with a manually-placed or
+# self-signed cert instead — not managed by Certbot, not in the 3x-ui
+# settings table. Pull whatever nginx is actually configured to terminate.
+if [ -d /etc/nginx ]; then
+  grep -rhoE '^[[:space:]]*ssl_certificate[[:space:]]+[^;]+;' /etc/nginx 2>/dev/null \
+    | grep -v '^[[:space:]]*#' \
+    | sed -E 's/^[[:space:]]*ssl_certificate[[:space:]]+//; s/;[[:space:]]*$//; s/^"//; s/"$//' \
+    | while IFS= read -r p; do
+        [ -n "$p" ] && report_cert "$(basename "$(dirname "$p")")" "$p"
+      done
+fi
 "#;
 
 /// `certificateFile` paths pulled straight from a 3x-ui panel's inbound
@@ -77,14 +108,24 @@ fn parse_openssl_date(raw: &str) -> Option<DateTime<Utc>> {
         .map(|naive| Utc.from_utc_datetime(&naive))
 }
 
-fn status_for(expires_at: Option<DateTime<Utc>>) -> String {
+fn status_for(issued_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc>>) -> String {
     let Some(expiry) = expires_at else {
         return "unknown".to_string();
     };
     let now = Utc::now();
     if expiry <= now {
-        "expired".to_string()
-    } else if expiry <= now + Duration::days(EXPIRING_SOON_DAYS) {
+        return "expired".to_string();
+    }
+    // A fixed 30-day window means nothing for short-lived profiles (e.g.
+    // Let's Encrypt's ~6-day IP certificates from 3x-ui's CLI) — every one
+    // of those would show "expiring" permanently, even fresh off a renewal.
+    // Scale the threshold to a third of the cert's own lifetime instead
+    // (mirrors Certbot's own default: renew with 30 of 90 days left), capped
+    // at EXPIRING_SOON_DAYS for ordinary long-lived certs.
+    let threshold = issued_at
+        .map(|issued| (expiry.signed_duration_since(issued) / 3).min(Duration::days(EXPIRING_SOON_DAYS)))
+        .unwrap_or_else(|| Duration::days(EXPIRING_SOON_DAYS));
+    if expiry <= now + threshold {
         "expiring".to_string()
     } else {
         "valid".to_string()
@@ -131,7 +172,7 @@ pub async fn list_certificates(app: &AppHandle, server: &ServerConfig) -> Result
         let issuer = fields[2].trim().to_string();
         let issued_at = parse_openssl_date(fields[3]);
         let expires_at = parse_openssl_date(fields[4]);
-        let status = status_for(expires_at);
+        let status = status_for(issued_at, expires_at);
 
         certificates.push(SslCertificate {
             cert_name,
