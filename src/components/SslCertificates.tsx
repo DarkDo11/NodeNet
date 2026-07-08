@@ -39,9 +39,25 @@ const renewCommand = (cert: SslCertificateRow) => {
     // which for 3x-ui's IP-cert flow is the real IP, not the "ip" folder
     // name — so use the SAN we parsed rather than certName.
     const domain = shellQuote(cert.domains[0] ?? cert.certName);
-    return [...ufwOpenPreamble, `~/.acme.sh/acme.sh --renew -d ${domain} --force`, ...ufwClosePostamble].join(
-      "\n",
-    );
+    // Unlike certbot, acme.sh has no "nginx plugin" — 3x-ui's CLI always
+    // issues these in --standalone mode, which is baked into the cert's
+    // saved renewal config and reused by plain `--renew`. Standalone binds
+    // port 80 itself, so if nginx already holds it the renewal fails
+    // outright ("tcp port 80 is already used ... Please stop it first").
+    // Stop nginx for the renewal and restart it right after, same
+    // track-and-revert pattern as the ufw rule above.
+    const renewStep = [
+      `NGINX_STOPPED=0`,
+      `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
+      `  systemctl stop nginx >/dev/null 2>&1 && NGINX_STOPPED=1`,
+      `fi`,
+      `~/.acme.sh/acme.sh --renew -d ${domain} --force`,
+      `RENEW_STATUS=$?`,
+      `if [ "$NGINX_STOPPED" = "1" ]; then`,
+      `  systemctl start nginx >/dev/null 2>&1`,
+      `fi`,
+    ];
+    return [...ufwOpenPreamble, ...renewStep, ...ufwClosePostamble.slice(1)].join("\n");
   }
 
   const name = shellQuote(cert.certName);
@@ -151,82 +167,84 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
           <span>Action</span>
         </div>
 
-        {isLoading && certificates.length === 0
-          ? Array.from({ length: 4 }, (_, index) => (
-              <div key={index} className="ssl-table row skeleton-row">
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line" />
-              </div>
-            ))
-          : certificates.map((cert) => (
-              <div className="ssl-table row" key={`${cert.serverId}:${cert.certName}`}>
-                <span>{cert.serverName}</span>
-                <span title={cert.domains.join(", ")}>
-                  {cert.domains[0]}
-                  {cert.domains.length > 1 ? ` +${cert.domains.length - 1}` : ""}
-                </span>
-                <span>{cert.issuer || "--"}</span>
-                <span>{formatDate(cert.issuedAt)}</span>
-                <span>{formatDate(cert.expiresAt)}</span>
-                <span className={statusClass(cert.status)}>
-                  {statusLabel(cert.status, cert.expiresAt)}
-                </span>
-                <span>
-                  {cert.source === "unknown" ? (
-                    <span
-                      className="muted-note"
-                      title="This certificate wasn't found under Certbot or acme.sh (3x-ui's CLI) — its origin is unknown, so automatic renewal isn't safe to offer. Renew it manually."
-                    >
-                      Manual renewal only
-                    </span>
-                  ) : (
-                    <button className="command-button" onClick={() => setPendingRenew(cert)}>
-                      <RefreshCw size={14} />
-                      <span>Renew</span>
-                    </button>
-                  )}
-                </span>
-              </div>
-            ))}
+        <div className="ssl-panel-scroll">
+          {isLoading && certificates.length === 0
+            ? Array.from({ length: 4 }, (_, index) => (
+                <div key={index} className="ssl-table row skeleton-row">
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line" />
+                </div>
+              ))
+            : certificates.map((cert) => (
+                <div className="ssl-table row" key={`${cert.serverId}:${cert.certName}`}>
+                  <span>{cert.serverName}</span>
+                  <span title={cert.domains.join(", ")}>
+                    {cert.domains[0]}
+                    {cert.domains.length > 1 ? ` +${cert.domains.length - 1}` : ""}
+                  </span>
+                  <span>{cert.issuer || "--"}</span>
+                  <span>{formatDate(cert.issuedAt)}</span>
+                  <span>{formatDate(cert.expiresAt)}</span>
+                  <span className={statusClass(cert.status)}>
+                    {statusLabel(cert.status, cert.expiresAt)}
+                  </span>
+                  <span>
+                    {cert.source === "unknown" ? (
+                      <span
+                        className="muted-note"
+                        title="This certificate wasn't found under Certbot or acme.sh (3x-ui's CLI) — its origin is unknown, so automatic renewal isn't safe to offer. Renew it manually."
+                      >
+                        Manual renewal only
+                      </span>
+                    ) : (
+                      <button className="command-button" onClick={() => setPendingRenew(cert)}>
+                        <RefreshCw size={14} />
+                        <span>Renew</span>
+                      </button>
+                    )}
+                  </span>
+                </div>
+              ))}
 
-        {serversWithoutCerts.map((server) => (
-          <div className="ssl-table row" key={server.id}>
-            <span>{server.name}</span>
-            <span>No certificates found</span>
-            <span />
-            <span />
-            <span />
-            <span />
-            <span>
-              {certbotInstalledByServer[server.id] === false ? (
-                <button
-                  className="command-button"
-                  onClick={() =>
-                    setStreamingOutput({
-                      title: `Install certbot on ${server.name}`,
-                      serverId: server.id,
-                      command: installCertbotCommand,
-                    })
-                  }
-                >
-                  <KeyRound size={14} />
-                  <span>Install certbot</span>
-                </button>
-              ) : null}
-            </span>
-          </div>
-        ))}
+          {serversWithoutCerts.map((server) => (
+            <div className="ssl-table row" key={server.id}>
+              <span>{server.name}</span>
+              <span>No certificates found</span>
+              <span />
+              <span />
+              <span />
+              <span />
+              <span>
+                {certbotInstalledByServer[server.id] === false ? (
+                  <button
+                    className="command-button"
+                    onClick={() =>
+                      setStreamingOutput({
+                        title: `Install certbot on ${server.name}`,
+                        serverId: server.id,
+                        command: installCertbotCommand,
+                      })
+                    }
+                  >
+                    <KeyRound size={14} />
+                    <span>Install certbot</span>
+                  </button>
+                ) : null}
+              </span>
+            </div>
+          ))}
 
-        {!isLoading && certificates.length === 0 && servers.length === 0 ? (
-          <div className="empty-state table-empty">
-            <span>Add a server to see its certificates</span>
-          </div>
-        ) : null}
+          {!isLoading && certificates.length === 0 && servers.length === 0 ? (
+            <div className="empty-state table-empty">
+              <span>Add a server to see its certificates</span>
+            </div>
+          ) : null}
+        </div>
       </section>
 
       {pendingRenew ? (

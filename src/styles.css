@@ -1621,6 +1621,11 @@ code {
   text-align: left;
 }
 
+.ssl-panel-scroll {
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+}
+
 .muted-note {
   color: var(--faint);
   font-size: 12px;
