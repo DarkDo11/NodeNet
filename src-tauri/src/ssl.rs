@@ -84,6 +84,13 @@ fn build_list_script(extra_cert_paths: &[String]) -> String {
             "report_cert \"$(basename \"$(dirname {quoted_path})\")\" {quoted_path}\n"
         ));
     }
+    // A shell script's exit status is whatever its last command happened to
+    // return — here that's one of the conditional checks (e.g. `[ -d
+    // /etc/nginx ]`), which is false on any server without nginx installed.
+    // Without this, a perfectly successful scan on such a server (or one
+    // with zero certs found) still exits non-zero and gets reported to the
+    // UI as "ssh command failed", discarding otherwise-valid output.
+    script.push_str("exit 0\n");
     script
 }
 
