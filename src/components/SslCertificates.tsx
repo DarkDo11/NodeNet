@@ -11,23 +11,67 @@ interface SslCertificatesProps {
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
+// Both the ufw rule and the nginx stop have to be reverted even when the
+// shell dies mid-renewal: a dropped SSH session (SIGHUP) would otherwise
+// leave port 80 open and, worse, nginx down. Revert from an EXIT trap so
+// every path out of the script restores the host, and route the signals
+// through `exit` so they land in that same handler.
+const cleanupPreamble = [
+  `UFW_ACTIVE=0; OPENED_PORT80=0; NGINX_STOPPED=0; CLEANED=0; RENEW_STATUS=1; PORT80_HOLDER=`,
+  `cleanup() {`,
+  `  [ "$CLEANED" = "1" ] && return`,
+  `  CLEANED=1`,
+  `  if [ "$NGINX_STOPPED" = "1" ]; then systemctl start nginx >/dev/null 2>&1; fi`,
+  `  if [ "$OPENED_PORT80" = "1" ]; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi`,
+  `}`,
+  `trap cleanup EXIT`,
+  `trap 'exit 129' HUP`,
+  `trap 'exit 130' INT`,
+  `trap 'exit 143' TERM`,
+];
+
 const ufwOpenPreamble = [
-  `UFW_ACTIVE=0; OPENED_PORT80=0`,
   `if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then`,
   `  UFW_ACTIVE=1`,
-  `  if ! ufw status | grep -qE '^80(/tcp)?[[:space:]]+ALLOW'; then`,
-  `    ufw allow 80/tcp >/dev/null 2>&1 && OPENED_PORT80=1`,
+  // Only an allow open to *any* source lets Let's Encrypt reach the
+  // challenge; a rule scoped to one address ("80/tcp ALLOW 10.0.0.5") would
+  // otherwise read as "already open" and leave the port shut to the CA.
+  `  if ! ufw status | grep -qE '^80(/tcp)?( \\(v6\\))?[[:space:]]+ALLOW[[:space:]]+Anywhere'; then`,
+  // `ufw allow` appends, so an existing broader deny sitting earlier in the
+  // chain shadows it and the port never actually opens. Insert at the top
+  // instead, falling back to append when the ruleset is empty (`insert 1`
+  // is rejected when there is no rule 1 to insert before).
+  `    if ufw insert 1 allow 80/tcp >/dev/null 2>&1 || ufw allow 80/tcp >/dev/null 2>&1; then`,
+  `      OPENED_PORT80=1`,
+  `    fi`,
   `  fi`,
   `fi`,
 ];
 
-const ufwClosePostamble = [
-  `RENEW_STATUS=$?`,
-  `if [ "$OPENED_PORT80" = "1" ]; then`,
-  `  ufw delete allow 80/tcp >/dev/null 2>&1 || true`,
+const captureRenewStatus = `RENEW_STATUS=$?`;
+
+// A challenge the CA cannot reach fails with nothing but "Timeout during
+// connect (likely firewall problem)", which never says *which* firewall.
+// Dump the host's own view of port 80 while the rules are still in place, so
+// a local block is distinguishable from one upstream of the machine.
+const port80Diagnostics = [
+  `if [ "$RENEW_STATUS" != "0" ]; then`,
+  `  echo "--- port 80 diagnostics ---" >&2`,
+  `  if [ -n "$PORT80_HOLDER" ]; then echo "$PORT80_HOLDER" >&2; else echo "nothing else was listening on :80 during the challenge" >&2; fi`,
+  `  if [ "$UFW_ACTIVE" = "1" ]; then ufw status numbered >&2; fi`,
+  `  command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | head -n 30 >&2`,
+  `  command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | head -n 30 >&2`,
+  `  echo "If nothing above blocks :80, the block is upstream of this host - provider firewall / security group / ISP filtering inbound 80." >&2`,
   `fi`,
-  `exit $RENEW_STATUS`,
 ];
+
+// Reverting is the EXIT trap's job; the script only has to name its status.
+const exitPostamble = [`exit $RENEW_STATUS`];
+
+// A squatter on :80 makes the standalone challenge unreachable just as a
+// firewall does, and by the time the renewal has failed the port is free
+// again — so snapshot the holder while the challenge is still live.
+const capturePort80Holder = `PORT80_HOLDER="$(ss -tlnp 2>/dev/null | grep -E ':80[[:space:]]' || true)"`;
 
 // Certbot has no record of an acme.sh-issued cert and vice versa (3x-ui's
 // own CLI issues IP/domain certs via acme.sh straight to /root/cert/, not
@@ -47,28 +91,39 @@ const renewCommand = (cert: SslCertificateRow) => {
     // Stop nginx for the renewal and restart it right after, same
     // track-and-revert pattern as the ufw rule above.
     const renewStep = [
-      `NGINX_STOPPED=0`,
       `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
       `  systemctl stop nginx >/dev/null 2>&1 && NGINX_STOPPED=1`,
       `fi`,
+      capturePort80Holder,
       `~/.acme.sh/acme.sh --renew -d ${domain} --force`,
-      `RENEW_STATUS=$?`,
-      `if [ "$NGINX_STOPPED" = "1" ]; then`,
-      `  systemctl start nginx >/dev/null 2>&1`,
-      `fi`,
+      captureRenewStatus,
     ];
-    return [...ufwOpenPreamble, ...renewStep, ...ufwClosePostamble.slice(1)].join("\n");
+    return [
+      ...cleanupPreamble,
+      ...ufwOpenPreamble,
+      ...renewStep,
+      ...port80Diagnostics,
+      ...exitPostamble,
+    ].join("\n");
   }
 
   const name = shellQuote(cert.certName);
   const renewStep = [
+    capturePort80Holder,
     `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
     `  certbot renew --cert-name ${name} --nginx --non-interactive --force-renewal`,
     `else`,
     `  certbot renew --cert-name ${name} --standalone --non-interactive --force-renewal`,
     `fi`,
   ];
-  return [...ufwOpenPreamble, ...renewStep, ...ufwClosePostamble].join("\n");
+  return [
+    ...cleanupPreamble,
+    ...ufwOpenPreamble,
+    ...renewStep,
+    captureRenewStatus,
+    ...port80Diagnostics,
+    ...exitPostamble,
+  ].join("\n");
 };
 
 const installCertbotCommand = [
@@ -82,7 +137,11 @@ const installCertbotCommand = [
 
 const formatDate = (value: string | null) =>
   value
-    ? new Date(value).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" })
+    ? new Date(value).toLocaleDateString([], {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      })
     : "--";
 
 const statusClass = (status: SslCertificateRow["status"]) => {
@@ -92,11 +151,17 @@ const statusClass = (status: SslCertificateRow["status"]) => {
   return "status-label";
 };
 
-const statusLabel = (status: SslCertificateRow["status"], expiresAt: string | null) => {
+const statusLabel = (
+  status: SslCertificateRow["status"],
+  expiresAt: string | null,
+) => {
   if (status === "expired") return "expired";
   if (status === "expiring") {
     const days = expiresAt
-      ? Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86_400_000))
+      ? Math.max(
+          0,
+          Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86_400_000),
+        )
       : null;
     return days !== null ? `expires in ${days}d` : "expiring";
   }
@@ -105,12 +170,21 @@ const statusLabel = (status: SslCertificateRow["status"], expiresAt: string | nu
 };
 
 export default function SslCertificates({ servers }: SslCertificatesProps) {
-  const { certificates, certbotInstalledByServer, errorByServer, isLoading, loadAllCertificates } =
-    useSslStore();
-  const [pendingRenew, setPendingRenew] = useState<SslCertificateRow | null>(null);
-  const [streamingOutput, setStreamingOutput] = useState<
-    { title: string; serverId: string; command: string } | null
-  >(null);
+  const {
+    certificates,
+    certbotInstalledByServer,
+    errorByServer,
+    isLoading,
+    loadAllCertificates,
+  } = useSslStore();
+  const [pendingRenew, setPendingRenew] = useState<SslCertificateRow | null>(
+    null,
+  );
+  const [streamingOutput, setStreamingOutput] = useState<{
+    title: string;
+    serverId: string;
+    command: string;
+  } | null>(null);
 
   const serverIds = servers.map((server) => server.id).join(",");
   useEffect(() => {
@@ -122,7 +196,8 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
     () =>
       servers.filter(
         (server) =>
-          !certificates.some((cert) => cert.serverId === server.id) && !errorByServer[server.id],
+          !certificates.some((cert) => cert.serverId === server.id) &&
+          !errorByServer[server.id],
       ),
     [servers, certificates, errorByServer],
   );
@@ -136,11 +211,16 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
           <p className="eyebrow">SSL</p>
           <h2>Certificates</h2>
           <span className="server-target">
-            {certificates.length} certificate(s) across {servers.length} server(s)
+            {certificates.length} certificate(s) across {servers.length}{" "}
+            server(s)
           </span>
         </div>
         <div className="header-actions">
-          <button className="command-button" disabled={isLoading} onClick={refresh}>
+          <button
+            className="command-button"
+            disabled={isLoading}
+            onClick={refresh}
+          >
             <RefreshCw size={16} className={isLoading ? "spin" : ""} />
             <span>Refresh</span>
           </button>
@@ -150,7 +230,10 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
       {Object.entries(errorByServer).map(([serverId, message]) => (
         <div className="error-state" key={serverId}>
           <div>
-            <strong>{servers.find((server) => server.id === serverId)?.name ?? serverId}</strong>
+            <strong>
+              {servers.find((server) => server.id === serverId)?.name ??
+                serverId}
+            </strong>
             <span>{message}</span>
           </div>
         </div>
@@ -181,11 +264,16 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
                 </div>
               ))
             : certificates.map((cert) => (
-                <div className="ssl-table row" key={`${cert.serverId}:${cert.certName}`}>
+                <div
+                  className="ssl-table row"
+                  key={`${cert.serverId}:${cert.certName}`}
+                >
                   <span>{cert.serverName}</span>
                   <span title={cert.domains.join(", ")}>
                     {cert.domains[0]}
-                    {cert.domains.length > 1 ? ` +${cert.domains.length - 1}` : ""}
+                    {cert.domains.length > 1
+                      ? ` +${cert.domains.length - 1}`
+                      : ""}
                   </span>
                   <span>{cert.issuer || "--"}</span>
                   <span>{formatDate(cert.issuedAt)}</span>
@@ -202,7 +290,10 @@ export default function SslCertificates({ servers }: SslCertificatesProps) {
                         Manual renewal only
                       </span>
                     ) : (
-                      <button className="command-button" onClick={() => setPendingRenew(cert)}>
+                      <button
+                        className="command-button"
+                        onClick={() => setPendingRenew(cert)}
+                      >
                         <RefreshCw size={14} />
                         <span>Renew</span>
                       </button>
