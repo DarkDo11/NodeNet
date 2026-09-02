@@ -53,7 +53,15 @@ done
 # as plain rows in its settings table, not under any Xray inbound, so pull
 # them out directly if the panel's local DB is present.
 if command -v sqlite3 >/dev/null 2>&1 && [ -f /etc/x-ui/x-ui.db ]; then
-  sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key IN ('webCertFile','subCertFile') AND value != '';" 2>/dev/null | while IFS= read -r p; do
+  # x-ui keeps this DB open and writes to it constantly (traffic counters,
+  # system metrics), so a plain read loses the race often enough to matter:
+  # sqlite3 exits with "database is locked" and the panel's own cert silently
+  # drops out of the scan. Open read-only and wait out any in-flight write,
+  # falling back to a plain read on sqlite3 builds too old for those flags.
+  panel_cert_query="SELECT value FROM settings WHERE key IN ('webCertFile','subCertFile') AND value != '';"
+  panel_certs=$(sqlite3 -readonly -cmd '.timeout 5000' /etc/x-ui/x-ui.db "$panel_cert_query" 2>/dev/null) \
+    || panel_certs=$(sqlite3 /etc/x-ui/x-ui.db "$panel_cert_query" 2>/dev/null)
+  printf '%s\n' "$panel_certs" | while IFS= read -r p; do
     [ -n "$p" ] && report_cert "$(basename "$(dirname "$p")")" "$p"
   done
 fi

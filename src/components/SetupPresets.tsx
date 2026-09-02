@@ -24,7 +24,8 @@ type PresetId =
   | "benchmark"
   | "region"
   | "hardenSsh"
-  | "ufw";
+  | "ufw"
+  | "panelSsl";
 
 interface PresetItem {
   id: PresetId;
@@ -34,6 +35,182 @@ interface PresetItem {
   recommended: boolean;
   outputWindow?: boolean;
 }
+
+// A panel certificate is only worth having if it renews itself, and both ACME
+// clients renew unattended out of cron - certbot from its timer, acme.sh from
+// its own crontab entry. Neither can pass an HTTP-01 challenge on a server set
+// up the way these are: ufw keeps :80 shut, and nginx usually holds the port
+// anyway. So the renewal has to open the door itself and put everything back
+// afterwards. One helper owns that dance and both clients call it, rather than
+// each carrying its own half-correct copy.
+const acmeHelperPath = "/usr/local/sbin/nodenet-acme-port80";
+
+const acmePortHelper = [
+  "#!/bin/sh",
+  "# Managed by NodeNet. Frees and reopens :80 around an ACME HTTP-01 challenge.",
+  // cron runs hooks with a bare PATH (/usr/bin:/bin on Debian and Ubuntu) while
+  // ufw lives in /usr/sbin, so an unqualified `ufw` is simply not found there:
+  // the port never opens and the renewal dies with a challenge timeout that
+  // names no cause. Set a full PATH before anything looks up a binary.
+  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  "export PATH",
+  // Revert only what this script itself changed - a host that already had :80
+  // open, or nginx already stopped, has to be left exactly as it was found.
+  // The record lives on disk rather than under /run because a host rebooted
+  // mid-renewal would otherwise forget it while the ufw rule it left behind
+  // survives the reboot, and then nothing would ever close the port again.
+  "STATE_DIR=/var/lib/nodenet-acme",
+  "",
+  "do_close() {",
+  '  if [ -f "$STATE_DIR/stopped-nginx" ]; then',
+  "    systemctl start nginx >/dev/null 2>&1",
+  '    rm -f "$STATE_DIR/stopped-nginx"',
+  "  fi",
+  '  if [ -f "$STATE_DIR/opened-80" ]; then',
+  "    ufw delete allow 80/tcp >/dev/null 2>&1",
+  '    rm -f "$STATE_DIR/opened-80"',
+  "  fi",
+  "}",
+  "",
+  'case "$1" in',
+  "  open)",
+  '    mkdir -p "$STATE_DIR"',
+  '    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then',
+  // A rule scoped to a single source address still reads as "80 ALLOW" while
+  // leaving the port shut to the CA, so only an allow from Anywhere counts.
+  "      if ! ufw status | grep -qE '^80(/tcp)?( \\(v6\\))?[[:space:]]+ALLOW[[:space:]]+Anywhere'; then",
+  // `ufw allow` appends, so a broader deny sitting earlier in the chain would
+  // shadow it; insert at the top, falling back to append on an empty ruleset.
+  "        if ufw insert 1 allow 80/tcp >/dev/null 2>&1 || ufw allow 80/tcp >/dev/null 2>&1; then",
+  '          : > "$STATE_DIR/opened-80"',
+  "        fi",
+  "      fi",
+  "    fi",
+  "    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then",
+  '      systemctl stop nginx >/dev/null 2>&1 && : > "$STATE_DIR/stopped-nginx"',
+  "    fi",
+  "    ;;",
+  "  close)",
+  "    do_close",
+  "    ;;",
+  // A renewal takes seconds, so a flag still standing long afterwards belongs
+  // to a run that was killed between its two hooks - by a signal, an OOM kill
+  // or a power cut. Nothing else would ever restore that host, so cron calls
+  // this to finish the job. The age check is what keeps it from tearing the
+  // port out from under a renewal that is legitimately still running.
+  "  reap)",
+  '    if [ -n "$(find "$STATE_DIR" -maxdepth 1 -type f -mmin +15 2>/dev/null | head -n 1)" ]; then',
+  "      do_close",
+  "    fi",
+  "    ;;",
+  "esac",
+  // The hook's own status must never decide the renewal's - a failed `ufw
+  // delete` cannot be allowed to turn a successful renewal into a failure.
+  "exit 0",
+].join("\n");
+
+const panelSslCommand = (host: string) => {
+  const ip = shellQuote(host);
+  const openHook = shellQuote(`${acmeHelperPath} open`);
+  const closeHook = shellQuote(`${acmeHelperPath} close`);
+  return [
+    `cat > ${acmeHelperPath} <<'NODENET_ACME_HOOK'`,
+    acmePortHelper,
+    "NODENET_ACME_HOOK",
+    `chmod 755 ${acmeHelperPath}`,
+    // Belt and braces: should this script die between opening the port and the
+    // ACME client's own post hook, the EXIT trap still restores the host.
+    `trap ${closeHook} EXIT`,
+    "trap 'exit 129' HUP",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+    // certbot runs every executable in these directories around each renewal it
+    // performs, whichever certificate triggered it - so wiring it here covers
+    // the certs on the box today and any issued later.
+    "if [ -d /etc/letsencrypt ]; then",
+    "  mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post",
+    `  printf '#!/bin/sh\\nexec ${acmeHelperPath} open\\n' > /etc/letsencrypt/renewal-hooks/pre/nodenet-acme-port80`,
+    `  printf '#!/bin/sh\\nexec ${acmeHelperPath} close\\n' > /etc/letsencrypt/renewal-hooks/post/nodenet-acme-port80`,
+    "  chmod 755 /etc/letsencrypt/renewal-hooks/pre/nodenet-acme-port80 /etc/letsencrypt/renewal-hooks/post/nodenet-acme-port80",
+    '  echo "certbot renewal hooks installed"',
+    "fi",
+    'ACME_HOME="$HOME/.acme.sh"',
+    '[ -d "$ACME_HOME" ] || ACME_HOME=/root/.acme.sh',
+    // 3x-ui keeps the panel's certificate path in its settings table and holds
+    // that database open for writing - read it read-only, so an in-flight write
+    // cannot make a configured panel look like it has no certificate at all.
+    'PANEL_CERT=""',
+    "if command -v sqlite3 >/dev/null 2>&1 && [ -f /etc/x-ui/x-ui.db ]; then",
+    `  PANEL_CERT=$(sqlite3 -readonly -cmd '.timeout 5000' /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key = 'webCertFile' AND value != '';" 2>/dev/null) || PANEL_CERT=""`,
+    "fi",
+    'if [ -n "$PANEL_CERT" ] && [ -f "$PANEL_CERT" ]; then',
+    '  echo "Panel already serves $PANEL_CERT - keeping it, only wiring renewals."',
+    "else",
+    `  echo "No panel certificate configured - issuing one for ${host}."`,
+    // acme.sh's standalone challenge listener is built on socat.
+    "  if ! command -v socat >/dev/null 2>&1; then",
+    "    if command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y socat >/dev/null 2>&1;",
+    "    elif command -v dnf >/dev/null 2>&1; then dnf install -y socat >/dev/null 2>&1;",
+    "    elif command -v yum >/dev/null 2>&1; then yum install -y socat >/dev/null 2>&1;",
+    "    elif command -v apk >/dev/null 2>&1; then apk add socat >/dev/null 2>&1; fi",
+    "  fi",
+    '  if [ ! -f "$ACME_HOME/acme.sh" ]; then',
+    "    curl -s https://get.acme.sh | sh >/dev/null 2>&1",
+    '    ACME_HOME="$HOME/.acme.sh"',
+    "  fi",
+    '  [ -f "$ACME_HOME/acme.sh" ] || { echo "acme.sh is missing and could not be installed" >&2; exit 1; }',
+    '  "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1',
+    // Let's Encrypt issues for a bare IP only under its shortlived profile
+    // (~6 days), which is exactly why renewal has to work unattended. Passing
+    // the hooks here makes acme.sh save them into this certificate's own
+    // renewal config, so every future cron run reuses them.
+    `  "$ACME_HOME/acme.sh" --issue -d ${ip} --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --pre-hook ${openHook} --post-hook ${closeHook} --force || { echo "Certificate issuance failed - see the output above." >&2; exit 1; }`,
+    "  mkdir -p /root/cert/ip",
+    // acme.sh exits non-zero when its reload command fails even though the cert
+    // files were installed fine, so test for the files rather than the status.
+    `  "$ACME_HOME/acme.sh" --installcert --force -d ${ip} --key-file /root/cert/ip/privkey.pem --fullchain-file /root/cert/ip/fullchain.pem --reloadcmd 'systemctl restart x-ui 2>/dev/null || rc-service x-ui restart 2>/dev/null' >/dev/null 2>&1 || true`,
+    '  { [ -f /root/cert/ip/fullchain.pem ] && [ -f /root/cert/ip/privkey.pem ]; } || { echo "Certificate files were not installed under /root/cert/ip." >&2; exit 1; }',
+    "  chmod 600 /root/cert/ip/privkey.pem",
+    "  chmod 644 /root/cert/ip/fullchain.pem",
+    "  if [ -x /usr/local/x-ui/x-ui ]; then",
+    "    /usr/local/x-ui/x-ui cert -webCert /root/cert/ip/fullchain.pem -webCertKey /root/cert/ip/privkey.pem",
+    "    systemctl restart x-ui >/dev/null 2>&1 || true",
+    '    echo "Panel certificate set - the panel now answers over https."',
+    "  else",
+    '    echo "3x-ui binary not found at /usr/local/x-ui/x-ui - certificate issued but not attached to the panel." >&2',
+    "  fi",
+    "fi",
+    // Certificates issued before this preset ran - by 3x-ui's own CLI, or by
+    // hand - carry empty hooks in their saved renewal config, so their cron
+    // renewals would still walk into the closed port. Point them all at the
+    // helper. acme.sh stores hook commands base64-wrapped in these markers and
+    // decodes them when it reloads the config to renew.
+    `PRE_B64=$(printf '%s' ${openHook} | base64 | tr -d '\\n')`,
+    `POST_B64=$(printf '%s' ${closeHook} | base64 | tr -d '\\n')`,
+    "WIRED=0",
+    'for conf in "$ACME_HOME"/*/*.conf; do',
+    '  [ -f "$conf" ] || continue',
+    `  grep -q '^Le_Domain=' "$conf" || continue`,
+    `  pre_line=$(printf "Le_PreHook='__ACME_BASE64__START_%s__ACME_BASE64__END_'" "$PRE_B64")`,
+    `  post_line=$(printf "Le_PostHook='__ACME_BASE64__START_%s__ACME_BASE64__END_'" "$POST_B64")`,
+    `  if grep -q '^Le_PreHook=' "$conf"; then sed -i "s|^Le_PreHook=.*|$pre_line|" "$conf"; else printf '%s\\n' "$pre_line" >> "$conf"; fi`,
+    `  if grep -q '^Le_PostHook=' "$conf"; then sed -i "s|^Le_PostHook=.*|$post_line|" "$conf"; else printf '%s\\n' "$post_line" >> "$conf"; fi`,
+    "  WIRED=$((WIRED + 1))",
+    "done",
+    'echo "acme.sh renewal configs wired to the port helper: $WIRED"',
+    // acme.sh renews only if its cron entry exists; a hand-installed acme.sh,
+    // or one whose crontab was cleared, has none.
+    `if [ -f "$ACME_HOME/acme.sh" ] && ! crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then`,
+    '  "$ACME_HOME/acme.sh" --install-cronjob >/dev/null 2>&1 || true',
+    "fi",
+    `crontab -l 2>/dev/null | grep 'acme.sh --cron' || echo "warning: no acme.sh cron entry - renewals will not run unattended" >&2`,
+    `if ! crontab -l 2>/dev/null | grep -q '${acmeHelperPath} reap'; then`,
+    `  (crontab -l 2>/dev/null; echo '*/5 * * * * ${acmeHelperPath} reap >/dev/null 2>&1') | crontab -`,
+    '  echo "port-80 reaper scheduled"',
+    "fi",
+    'echo "Done. Renewals now open port 80 and stop nginx by themselves, then restore both."',
+  ].join("\n");
+};
 
 const presets: PresetItem[] = [
   {
@@ -95,6 +272,15 @@ const presets: PresetItem[] = [
     id: "ufw",
     name: "Configure UFW firewall",
     description: "Restricts SSH to your management IP, opens panel/HTTPS ports, and shows status.",
+    command: "",
+    recommended: true,
+    outputWindow: true,
+  },
+  {
+    id: "panelSsl",
+    name: "Panel SSL with auto-renewal",
+    description:
+      "Issues a Let's Encrypt certificate for the panel, serves the panel over HTTPS, and teaches renewals to open UFW and free port 80 on their own.",
     command: "",
     recommended: true,
     outputWindow: true,
@@ -173,6 +359,9 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
       if (preset.id === "install3xui") {
         setShowPanelCredentialPrompt(true);
       }
+      if (preset.id === "panelSsl") {
+        await upgradePanelUrlToHttps();
+      }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       setError(error.message);
@@ -182,6 +371,22 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
     } finally {
       if (!keepRunning) setRunning(null);
     }
+  };
+
+  // The preset moves the panel onto TLS, so the stored panel URL has to follow
+  // it: a saved http:// URL against an https listener fails every panel call -
+  // inbounds, clients, traffic - with a connection error that reads like the
+  // panel broke rather than like a stale scheme.
+  const upgradePanelUrlToHttps = async () => {
+    const url = server.panelUrl?.trim();
+    if (!url || !url.toLowerCase().startsWith("http://")) return;
+    const updated = { ...server, panelUrl: `https://${url.slice("http://".length)}` };
+    if (onServerUpdated) {
+      await onServerUpdated(updated);
+    } else {
+      await invoke("upsert_server", { server: updated });
+    }
+    setMessage("Panel URL switched to https");
   };
 
   const runSelected = async () => {
@@ -224,6 +429,10 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
         "ufw reload",
         "ufw status verbose",
       ].filter(Boolean).join(" && ");
+    }
+
+    if (preset.id === "panelSsl") {
+      return panelSslCommand(server.host);
     }
 
     if (preset.id === "sshKey") {
