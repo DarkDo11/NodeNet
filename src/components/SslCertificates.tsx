@@ -108,11 +108,22 @@ const renewCommand = (cert: SslCertificateRow) => {
   }
 
   const name = shellQuote(cert.certName);
+  // certbot's nginx plugin ships as its own package (python3-certbot-nginx)
+  // and is routinely missing on hosts where certbot itself is installed, so a
+  // running nginx is not on its own evidence that `--nginx` will work: without
+  // the plugin certbot refuses the whole renewal with "The requested nginx
+  // plugin does not appear to be installed". Standalone is always available,
+  // but it binds :80 itself, so nginx has to step aside for the challenge -
+  // tracked and put back by the same cleanup trap that reverts the ufw rule.
   const renewStep = [
-    capturePort80Holder,
-    `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
+    `if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null && certbot plugins --non-interactive 2>/dev/null | grep -qE '^\\* nginx$'; then`,
+    `  ${capturePort80Holder}`,
     `  certbot renew --cert-name ${name} --nginx --non-interactive --force-renewal`,
     `else`,
+    `  if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then`,
+    `    systemctl stop nginx >/dev/null 2>&1 && NGINX_STOPPED=1`,
+    `  fi`,
+    `  ${capturePort80Holder}`,
     `  certbot renew --cert-name ${name} --standalone --non-interactive --force-renewal`,
     `fi`,
   ];
