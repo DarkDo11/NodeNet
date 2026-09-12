@@ -28,6 +28,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::Duration,
 };
 use tauri::{AppHandle, Emitter};
@@ -134,7 +135,9 @@ pub async fn delete_server(app: AppHandle, server_id: String) -> Result<AppConfi
         three_x_ui::delete_credentials(&app, server)
             .await
             .map_err(|error| error.to_string())?;
-        remove_server_from_metrics_cache(&server.id).map_err(|error| error.to_string())?;
+        remove_server_from_metrics_cache(&server.id)
+            .await
+            .map_err(|error| error.to_string())?;
         alerts::remove_events_for_server(&app, &server.id)
             .await
             .map_err(|error| error.to_string())?;
@@ -1027,8 +1030,56 @@ fn metrics_cache_path() -> anyhow::Result<PathBuf> {
     Ok(crate::config::config_dir()?.join("metrics-cache.json"))
 }
 
+fn metrics_backup_dir() -> anyhow::Result<PathBuf> {
+    Ok(crate::config::config_dir()?.join("metrics-backups"))
+}
+
+/// How many daily backups of the local metrics cache to keep.
+const METRICS_BACKUP_KEEP: usize = 7;
+
+/// All writers of `metrics-cache.json` go through this lock. The frontend's
+/// `save_metrics_cache` and the periodic `load_metrics_cache` delta merge run
+/// on the same interval and used to race each other on a shared tmp file,
+/// which is how the on-disk cache could end up as interleaved, unparseable
+/// JSON — and months of history with it.
+static METRICS_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn metrics_write_lock() -> &'static tokio::sync::Mutex<()> {
+    METRICS_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn cache_point_count(cache: &Value) -> usize {
+    cache
+        .as_object()
+        .map(|obj| obj.values().filter_map(Value::as_array).map(Vec::len).sum())
+        .unwrap_or(0)
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    path.with_extension(format!("json.tmp-{}-{nanos}", std::process::id()))
+}
+
+/// Write the cache atomically (write-then-rename, unique tmp name, under the
+/// global write lock). Refuses to replace a non-empty cache file with an empty
+/// one: an empty payload is far more likely a failed load than a real "no
+/// history" state, and this file is the only long-term store we have.
 async fn write_metrics_cache(cache: &Value) -> Result<(), String> {
     let path = metrics_cache_path().map_err(|e| e.to_string())?;
+    let _guard = metrics_write_lock().lock().await;
+
+    if cache_point_count(cache) == 0 {
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            // "{}" is 2 bytes; anything meaningfully larger holds history.
+            if meta.len() > 16 {
+                return Ok(());
+            }
+        }
+    }
+
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir)
             .await
@@ -1038,15 +1089,120 @@ async fn write_metrics_cache(cache: &Value) -> Result<(), String> {
     // tens of MB across months of history, so skipping indentation whitespace
     // meaningfully cuts disk I/O and IPC transfer time on every load/save.
     let raw = serde_json::to_string(cache).map_err(|e| e.to_string())?;
-    // Write-then-rename so a crash mid-write can never leave a truncated,
-    // unparseable cache file behind (rename is atomic on the same filesystem).
-    let tmp_path = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp_path, &raw)
-        .await
-        .map_err(|e| e.to_string())?;
+    let tmp_path = unique_tmp_path(&path);
+    if let Err(e) = tokio::fs::write(&tmp_path, &raw).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e.to_string());
+    }
+
+    rotate_daily_backup(&path).await;
+
     tokio::fs::rename(&tmp_path, &path)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Once per day, move the previous cache file into `metrics-backups/` (a
+/// rename, so no copy of a 40 MB file) before it gets replaced, and prune
+/// backups beyond `METRICS_BACKUP_KEEP`. Must be called with the write lock
+/// held and before the new file is renamed into place.
+async fn rotate_daily_backup(path: &Path) {
+    let Ok(backup_dir) = metrics_backup_dir() else {
+        return;
+    };
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return;
+    };
+    if meta.len() <= 16 {
+        return;
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let backup_path = backup_dir.join(format!("metrics-cache-{today}.json"));
+    if tokio::fs::metadata(&backup_path).await.is_ok() {
+        return;
+    }
+    if tokio::fs::create_dir_all(&backup_dir).await.is_err() {
+        return;
+    }
+    if tokio::fs::rename(path, &backup_path).await.is_err() {
+        return;
+    }
+
+    let mut backups = list_backups(&backup_dir).await;
+    backups.sort();
+    while backups.len() > METRICS_BACKUP_KEEP {
+        let oldest = backups.remove(0);
+        let _ = tokio::fs::remove_file(&oldest).await;
+    }
+}
+
+async fn list_backups(backup_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(backup_dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("metrics-cache-") && name.ends_with(".json") {
+            out.push(entry.path());
+        }
+    }
+    out
+}
+
+/// Newest parseable daily backup, if any. Used when the live cache is corrupt.
+async fn load_latest_backup() -> Option<Value> {
+    let backup_dir = metrics_backup_dir().ok()?;
+    let mut backups = list_backups(&backup_dir).await;
+    backups.sort();
+    for backup in backups.into_iter().rev() {
+        let Ok(raw) = tokio::fs::read_to_string(&backup).await else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            if cache_point_count(&value) > 0 {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Read the on-disk cache. A corrupt file is preserved as
+/// `metrics-cache.corrupt-<timestamp>.json` (never silently discarded), and
+/// the newest daily backup is used in its place when one exists.
+async fn read_local_metrics_cache(app: &AppHandle, path: &Path) -> Result<Value, String> {
+    // Hold the write lock while reading so we never observe the brief gap
+    // between the backup rotation rename and the new file landing.
+    let _guard = metrics_write_lock().lock().await;
+    if !path.exists() {
+        return Ok(Value::Object(Default::default()));
+    }
+    let raw = tokio::fs::read_to_string(path).await.map_err(|e| e.to_string())?;
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let quarantine = path.with_file_name(format!("metrics-cache.corrupt-{stamp}.json"));
+            let _ = tokio::fs::rename(path, &quarantine).await;
+
+            let restored = load_latest_backup().await;
+            let _ = app.emit(
+                "alert-error",
+                format!(
+                    "metrics cache at {} was corrupted ({e}); moved to {} and {}",
+                    path.display(),
+                    quarantine.display(),
+                    if restored.is_some() {
+                        "restored the latest daily backup"
+                    } else {
+                        "no backup was available"
+                    }
+                ),
+            );
+            Ok(restored.unwrap_or_else(|| Value::Object(Default::default())))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1054,24 +1210,7 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
     // Always read the local cache first — it is the persisted baseline from
     // the previous session (written by save_metrics_cache).
     let path = metrics_cache_path().map_err(|e| e.to_string())?;
-    let local_cache: Value = if path.exists() {
-        let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        match serde_json::from_str(&raw) {
-            Ok(value) => value,
-            Err(e) => {
-                let _ = app.emit(
-                    "alert-error",
-                    format!(
-                        "metrics cache at {} was corrupted and could not be loaded ({e}); starting from empty history",
-                        path.display()
-                    ),
-                );
-                Value::Object(Default::default())
-            }
-        }
-    } else {
-        Value::Object(Default::default())
-    };
+    let local_cache = read_local_metrics_cache(&app, &path).await?;
 
     let monitor_enabled = crate::config::load_config()
         .map(|cfg| monitor::is_enabled(&cfg))
@@ -1081,10 +1220,13 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
         return Ok(local_cache);
     }
 
-    let has_local_data = local_cache.as_object().is_some_and(|o| !o.is_empty());
+    let has_local_data = cache_point_count(&local_cache) > 0;
 
     if has_local_data {
         // Delta load: only download points newer than what we already have.
+        // Servers with a suspiciously thin local history are re-fetched in
+        // full so a wiped cache backfills from the monitor instead of
+        // freezing at "whatever we saw since the wipe".
         let since = latest_timestamps(&local_cache);
         if let Ok(delta) = monitor::fetch_metrics_delta(&app, &since).await {
             let mut merged = local_cache;
@@ -1100,13 +1242,19 @@ pub async fn load_metrics_cache(app: AppHandle) -> Result<Value, String> {
 
     // No local cache yet: download the full history from the monitor and
     // persist it immediately so the next startup can use delta loading.
-    if let Ok(Some(full)) = monitor::load_metrics_cache(&app).await {
-        if let Err(e) = write_metrics_cache(&full).await {
-            let _ = app.emit("alert-error", format!("metrics cache save failed: {e}"));
+    match monitor::load_metrics_cache(&app).await {
+        Ok(Some(full)) => {
+            if let Err(e) = write_metrics_cache(&full).await {
+                let _ = app.emit("alert-error", format!("metrics cache save failed: {e}"));
+            }
+            Ok(full)
         }
-        return Ok(full);
+        Ok(None) => Ok(Value::Object(Default::default())),
+        // Surface the failure instead of returning "{}": the frontend keeps
+        // its current in-memory history on error, but would wipe it on an
+        // empty success.
+        Err(e) => Err(format!("failed to download metrics history from monitor: {e}")),
     }
-    Ok(Value::Object(Default::default()))
 }
 
 #[tauri::command]
@@ -1114,22 +1262,23 @@ pub async fn save_metrics_cache(cache: Value) -> Result<(), String> {
     write_metrics_cache(&cache).await
 }
 
-fn remove_server_from_metrics_cache(server_id: &str) -> anyhow::Result<()> {
+async fn remove_server_from_metrics_cache(server_id: &str) -> anyhow::Result<()> {
     let path = metrics_cache_path()?;
     if !path.exists() {
         return Ok(());
     }
 
-    let raw = fs::read_to_string(&path)?;
-    let mut cache = serde_json::from_str::<Value>(&raw)?;
+    let mut cache = {
+        let _guard = metrics_write_lock().lock().await;
+        let raw = tokio::fs::read_to_string(&path).await?;
+        serde_json::from_str::<Value>(&raw)?
+    };
     if let Some(object) = cache.as_object_mut() {
         object.remove(server_id);
     }
-    let raw = serde_json::to_string(&cache)?;
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, raw)?;
-    fs::rename(&tmp_path, &path)?;
-    Ok(())
+    write_metrics_cache(&cache)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 fn parse_panel_setup_info(output: &str, source: &str) -> PanelSetupInfo {
@@ -1302,10 +1451,18 @@ fn first_u16(line: &str) -> Option<u16> {
 ///
 /// Handles both ISO-8601 string timestamps (monitor format) and numeric
 /// epoch-ms timestamps (frontend MetricPoint format saved to local disk).
-/// Matches the remote monitor agent's own retention cap (see
-/// `MAX_POINTS_PER_SERVER` in `monitor.rs`'s embedded Python agent) so the
-/// local delta-merged cache can't grow unbounded between app restarts.
-const MAX_POINTS_PER_SERVER: usize = 20_000;
+/// Safety cap for the local delta-merged cache. Intentionally far above the
+/// remote agent's `MAX_POINTS_PER_SERVER` (20k ≈ two weeks at 60 s): the
+/// frontend's `applyRetention` keeps up to two years of aggregated history
+/// here (~25k points at a 60 s poll), and a cap at the remote's size was
+/// silently draining the oldest — i.e. the only long-term — points.
+const MAX_POINTS_PER_SERVER: usize = 200_000;
+
+/// Below this many local points a server's history is treated as "thin" and
+/// the delta fetch asks the monitor for everything it has (`since = 0`) so a
+/// wiped or brand-new cache backfills fully. A freshly added server also has
+/// few points on the monitor, so the extra transfer is cheap there.
+const THIN_HISTORY_POINTS: usize = 500;
 
 fn point_timestamp_ms(point: &Value) -> Option<i64> {
     let ts = point.get("timestamp")?;
@@ -1327,20 +1484,20 @@ fn latest_timestamps(cache: &Value) -> HashMap<String, i64> {
         let Some(arr) = history.as_array() else {
             continue;
         };
-        let latest_ms = arr
-            .iter()
-            .filter_map(point_timestamp_ms)
-            .max()
-            .unwrap_or(0);
+        let latest_ms = if arr.len() < THIN_HISTORY_POINTS {
+            0
+        } else {
+            arr.iter().filter_map(point_timestamp_ms).max().unwrap_or(0)
+        };
         since.insert(server_id.clone(), latest_ms);
     }
     since
 }
 
-/// Append new points from `delta` into `base`.  Duplicate-free by design:
-/// `fetch_metrics_delta` uses a strict `>` cutoff so delta never overlaps base.
-/// Each server's array is re-sorted and capped at `MAX_POINTS_PER_SERVER` so
-/// repeated merges across restarts can't grow the on-disk cache without bound.
+/// Append new points from `delta` into `base`. Points are de-duplicated by
+/// timestamp (a thin-history backfill re-sends everything the monitor has),
+/// re-sorted, and capped at `MAX_POINTS_PER_SERVER` so repeated merges across
+/// restarts can't grow the on-disk cache without bound.
 fn merge_cache_delta(base: &mut Value, delta: Value) {
     let (Some(base_obj), Some(delta_obj)) = (base.as_object_mut(), delta.as_object()) else {
         return;
@@ -1358,6 +1515,7 @@ fn merge_cache_delta(base: &mut Value, delta: Value) {
         if let Some(existing) = entry.as_array_mut() {
             existing.extend(new_arr.iter().cloned());
             existing.sort_by_key(|p| point_timestamp_ms(p).unwrap_or(0));
+            existing.dedup_by_key(|p| point_timestamp_ms(p).unwrap_or(0));
             if existing.len() > MAX_POINTS_PER_SERVER {
                 let excess = existing.len() - MAX_POINTS_PER_SERVER;
                 existing.drain(0..excess);
@@ -1457,6 +1615,38 @@ WebBasePath: abc123/
         assert_eq!(
             value_after_separator("webBasePath: /abc/ \u{1b}[0m").as_deref(),
             Some("/abc/")
+        );
+    }
+
+    fn point(ts: i64) -> Value {
+        serde_json::json!({ "timestamp": ts, "cpu": 1 })
+    }
+
+    #[test]
+    fn merge_dedupes_overlapping_backfill() {
+        let mut base = serde_json::json!({ "a": [point(1_000_000_000_000), point(1_000_000_060_000)] });
+        let delta = serde_json::json!({
+            "a": [point(1_000_000_060_000), point(1_000_000_120_000)],
+            "b": [point(5)],
+        });
+        merge_cache_delta(&mut base, delta);
+        assert_eq!(base["a"].as_array().unwrap().len(), 3);
+        assert_eq!(base["b"].as_array().unwrap().len(), 1);
+        assert_eq!(cache_point_count(&base), 4);
+    }
+
+    #[test]
+    fn thin_history_requests_full_backfill() {
+        let thin: Vec<Value> = (0..10).map(|i| point(1_000_000_000_000 + i * 60_000)).collect();
+        let full: Vec<Value> = (0..THIN_HISTORY_POINTS as i64)
+            .map(|i| point(1_000_000_000_000 + i * 60_000))
+            .collect();
+        let cache = serde_json::json!({ "thin": thin, "full": full });
+        let since = latest_timestamps(&cache);
+        assert_eq!(since["thin"], 0);
+        assert_eq!(
+            since["full"],
+            1_000_000_000_000 + (THIN_HISTORY_POINTS as i64 - 1) * 60_000
         );
     }
 }

@@ -2711,6 +2711,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "directories",
+ "flate2",
  "futures",
  "reqwest 0.12.28",
  "russh",

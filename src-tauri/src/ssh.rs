@@ -485,6 +485,21 @@ pub async fn execute(
     retry_ssh_operation(|| async { execute_once(app, server, remote_command).await }).await
 }
 
+/// Like `execute`, but with a caller-chosen timeout. Used for bulk transfers
+/// (the monitor's metrics cache) that can legitimately exceed the default
+/// `SSH_COMMAND_TIMEOUT_SECS`.
+pub async fn execute_with_timeout(
+    app: &AppHandle,
+    server: &ServerConfig,
+    remote_command: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    retry_ssh_operation(|| async {
+        execute_once_with_options(app, server, remote_command, timeout_secs, false).await
+    })
+    .await
+}
+
 pub async fn execute_combined(
     app: &AppHandle,
     server: &ServerConfig,

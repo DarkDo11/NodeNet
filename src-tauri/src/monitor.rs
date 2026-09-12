@@ -44,9 +44,7 @@ async fn fetch_cached_monitor_metrics(app: &AppHandle, monitor: &ServerConfig) -
         }
     }
 
-    let raw = read_remote_file(app, monitor, REMOTE_METRICS_PATH, "{}").await?;
-    let value = parse_json_value_from_output(&raw, '{', '}')
-        .unwrap_or_else(|| Value::Object(Default::default()));
+    let value = read_remote_json_compressed(app, monitor, REMOTE_METRICS_PATH).await?;
 
     *guard = Some(CachedMonitorMetrics {
         value: value.clone(),
@@ -793,6 +791,51 @@ async fn read_remote_file(
     ssh::execute(app, monitor, &command).await
 }
 
+/// Bulk-transfer timeout for the monitor's metrics cache. The file can reach
+/// hundreds of MB uncompressed; gzip brings that down ~10x, but keep a wide
+/// margin over `SSH_COMMAND_TIMEOUT_SECS` so a slow link doesn't turn into an
+/// empty history on the client.
+const METRICS_TRANSFER_TIMEOUT_SECS: u64 = 180;
+
+/// Read a (potentially huge) remote JSON file as `gzip | base64` and decode it
+/// locally. Unlike `read_remote_file`, a transfer or parse failure is an error —
+/// callers must never mistake a broken download for "the monitor has no data".
+async fn read_remote_json_compressed(
+    app: &AppHandle,
+    monitor: &ServerConfig,
+    remote_path: &str,
+) -> Result<Value> {
+    let command = format!(
+        "if [ -f {path} ]; then gzip -1 -c {path} | base64 | tr -d '\\n'; else printf %s e30=; fi",
+        path = shell_single_quote(remote_path),
+    );
+    let raw = ssh::execute_with_timeout(app, monitor, &command, METRICS_TRANSFER_TIMEOUT_SECS)
+        .await?;
+    decode_compressed_json(&raw)
+}
+
+/// Decode `base64(gzip(json))` (or plain base64 JSON, e.g. `e30=` for `{}`).
+pub(crate) fn decode_compressed_json(raw: &str) -> Result<Value> {
+    use std::io::Read as _;
+
+    let trimmed: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = STANDARD
+        .decode(trimmed.as_bytes())
+        .context("monitor returned malformed base64 payload")?;
+    let is_gzip = bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
+    let json = if is_gzip {
+        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut out = String::new();
+        decoder
+            .read_to_string(&mut out)
+            .context("monitor returned corrupted gzip payload")?;
+        out
+    } else {
+        String::from_utf8(bytes).context("monitor returned non-UTF8 payload")?
+    };
+    serde_json::from_str::<Value>(json.trim()).context("monitor returned invalid JSON")
+}
+
 fn service_unit() -> &'static str {
     r#"[Unit]
 Description=NodeNet remote monitor agent
@@ -937,7 +980,10 @@ def load_json(path, fallback):
 def save_json(path, value):
     tmp = pathlib.Path(str(path) + ".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2)
+        # Compact output: the metrics cache holds hundreds of thousands of
+        # points and pretty-printing roughly triples its size on disk and
+        # over the wire.
+        json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp, path)
 
 def ensure_dict(value):
@@ -1214,9 +1260,9 @@ pub async fn fetch_metrics_delta(app: &AppHandle, since: &HashMap<String, i64>) 
     let since_json = serde_json::to_string(since)?;
     let since_b64 = STANDARD.encode(since_json.as_bytes());
     let command = delta_command(&since_b64);
-    let raw = ssh::execute(app, &monitor, &command).await?;
-    Ok(parse_json_value_from_output(&raw, '{', '}')
-        .unwrap_or_else(|| Value::Object(Default::default())))
+    let raw = ssh::execute_with_timeout(app, &monitor, &command, METRICS_TRANSFER_TIMEOUT_SECS)
+        .await?;
+    decode_compressed_json(&raw)
 }
 
 fn delta_command(since_b64: &str) -> String {
@@ -1249,9 +1295,43 @@ for sid, pts in (cache if isinstance(cache, dict) else {{}}).items():
         if isinstance(p, dict) and parse_ms(p.get("timestamp") or "") > cutoff
     ]
 
-import sys
-sys.stdout.write(json.dumps(result, ensure_ascii=False))
+import sys, gzip, base64
+payload = gzip.compress(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode(), compresslevel=1)
+sys.stdout.write(base64.b64encode(payload).decode())
 _NN_DELTA_"#,
         since_b64 = since_b64
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn decodes_gzipped_base64_json() {
+        let json = r#"{"a":[{"timestamp":"2026-09-13T00:00:00Z"}]}"#;
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(json.as_bytes()).unwrap();
+        let gz = encoder.finish().unwrap();
+        // GNU base64 wraps at 76 columns; the decoder must tolerate newlines.
+        let mut b64 = STANDARD.encode(gz);
+        b64.insert(10, '\n');
+        let value = decode_compressed_json(&b64).unwrap();
+        assert_eq!(value["a"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn decodes_plain_base64_fallback() {
+        // "e30=" is base64("{}"), the remote's fallback when no cache exists.
+        let value = decode_compressed_json("e30=").unwrap();
+        assert!(value.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_garbage_instead_of_returning_empty() {
+        assert!(decode_compressed_json("not base64!!").is_err());
+        assert!(decode_compressed_json(&STANDARD.encode("{ broken")).is_err());
+    }
 }

@@ -297,6 +297,16 @@ const aggregatePoints = (points: MetricPoint[], bucketMs: number): MetricPoint[]
     });
 };
 
+/** Union of two histories keyed by timestamp; `primary` wins on collisions. */
+const mergeHistories = (primary: MetricPoint[], secondary: MetricPoint[]) => {
+  const byTimestamp = new Map<number, MetricPoint>();
+  for (const point of secondary) byTimestamp.set(point.timestamp, point);
+  for (const point of primary) byTimestamp.set(point.timestamp, point);
+  return recomputeRates(
+    Array.from(byTimestamp.values()).sort((a, b) => a.timestamp - b.timestamp),
+  );
+};
+
 const applyRetention = (history: MetricPoint[]) => {
   const now = Date.now();
   const raw = history.filter((point) => now - point.timestamp <= 7 * DAY_MS);
@@ -405,12 +415,29 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
   loadMetricsCache: async () => {
     try {
       const rawCache = await invoke<Record<string, unknown>>("load_metrics_cache");
-      const historyByServer = Object.fromEntries(
+      const loaded = Object.fromEntries(
         Object.entries(rawCache).map(([serverId, history]) => [
           serverId,
           applyRetention(normalizeHistory(serverId, history)),
         ]),
       );
+
+      // Never let a thinner result replace what we already hold in memory:
+      // the backend returns "{}" when there is no cache yet, and a partial
+      // object when the monitor is mid-rotation. Losing in-memory history
+      // here would be persisted by the next save_metrics_cache and become
+      // permanent. Per server, keep whichever side has more history.
+      const current = get().historyByServer;
+      const historyByServer: Record<string, MetricPoint[]> = { ...current };
+      for (const [serverId, history] of Object.entries(loaded)) {
+        const existing = current[serverId] ?? [];
+        if (history.length === 0) continue;
+        historyByServer[serverId] =
+          existing.length > history.length
+            ? applyRetention(mergeHistories(existing, history))
+            : history;
+      }
+
       const metricsByServer = Object.fromEntries(
         Object.entries(historyByServer).flatMap(([serverId, history]) => {
           const latest = history[history.length - 1];
