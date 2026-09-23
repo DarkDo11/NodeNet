@@ -11,7 +11,8 @@ import {
   SquareTerminal,
   Users,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useRef } from "react";
+import { AnimatePresence, Reorder, motion } from "framer-motion";
 import CountryFlag from "./CountryFlag";
 import type { MetricPoint, PingResult, ServerConfig } from "../types";
 
@@ -33,6 +34,8 @@ interface SidebarProps {
   latestMetricsByServer: Record<string, MetricPoint | undefined>;
   activeView: AppView;
   onSelectServer: (serverId: string) => void;
+  onReorderServers: (servers: ServerConfig[]) => void;
+  onReorderServersEnd: () => void;
   onChangeView: (view: AppView) => void;
 }
 
@@ -43,8 +46,14 @@ export default function Sidebar({
   latestMetricsByServer,
   activeView,
   onSelectServer,
+  onReorderServers,
+  onReorderServersEnd,
   onChangeView,
 }: SidebarProps) {
+  // A drag ends with a pointerup on the item, which the browser turns into a click;
+  // swallow that click so dropping a server doesn't also select it.
+  const suppressClickRef = useRef(false);
+
   return (
     <aside className="sidebar">
       <div className="brand-row" data-window-drag data-tauri-drag-region>
@@ -137,7 +146,13 @@ export default function Sidebar({
         <Activity size={15} />
       </div>
 
-      <div className="server-list">
+      <Reorder.Group
+        as="div"
+        axis="y"
+        values={servers}
+        onReorder={onReorderServers}
+        className="server-list"
+      >
         <AnimatePresence initial={false}>
           {servers.map((server) => {
           const status = statusById[server.id]?.status ?? "unknown";
@@ -146,15 +161,33 @@ export default function Sidebar({
           const selected = selectedServerId === server.id;
 
           return (
-            <motion.button
+            <Reorder.Item
+              as="button"
               key={server.id}
-              layout
+              value={server}
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -10 }}
               transition={{ duration: 0.22 }}
+              whileDrag={{ scale: 1.02, zIndex: 2 }}
               className={selected ? "server-item selected" : "server-item"}
-              onClick={() => onSelectServer(server.id)}
+              onDragStart={() => {
+                suppressClickRef.current = true;
+              }}
+              onDragEnd={() => {
+                onReorderServersEnd();
+                // If the pointer was released outside the item no click follows; reset after it would have fired.
+                setTimeout(() => {
+                  suppressClickRef.current = false;
+                }, 0);
+              }}
+              onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                onSelectServer(server.id);
+              }}
             >
               {selected ? (
                 <motion.span className="server-selection-glow" layoutId="server-selection" />
@@ -174,7 +207,7 @@ export default function Sidebar({
                 </span>
               </span>
               <span className={`status-dot ${status}`} />
-            </motion.button>
+            </Reorder.Item>
           );
         })}
         </AnimatePresence>
@@ -185,7 +218,7 @@ export default function Sidebar({
             <span>No servers</span>
           </div>
         ) : null}
-      </div>
+      </Reorder.Group>
     </aside>
   );
 }

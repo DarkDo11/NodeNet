@@ -2,7 +2,8 @@ use crate::{
     alerts,
     config::{
         config_path, delete_bastion as delete_bastion_config,
-        delete_server as delete_server_config, find_server, load_config, save_config,
+        delete_server as delete_server_config, find_server, load_config,
+        reorder_servers as reorder_servers_config, save_config,
         set_monitor_server as set_monitor_server_config,
         set_monitor_target as set_monitor_target_config,
         set_poll_interval as set_poll_interval_config, set_theme as set_theme_config,
@@ -88,6 +89,13 @@ pub fn save_app_config(config: AppConfig) -> Result<AppConfig, String> {
 #[tauri::command]
 pub fn upsert_server(app: AppHandle, server: ServerConfig) -> Result<AppConfig, String> {
     let config = upsert_server_config(server).map_err(|error| error.to_string())?;
+    let _ = app.emit("servers-changed", ());
+    Ok(config)
+}
+
+#[tauri::command]
+pub fn reorder_servers(app: AppHandle, server_ids: Vec<String>) -> Result<AppConfig, String> {
+    let config = reorder_servers_config(&server_ids).map_err(|error| error.to_string())?;
     let _ = app.emit("servers-changed", ());
     Ok(config)
 }

@@ -51,6 +51,8 @@ export default function App() {
     selectServer,
     upsertServer,
     deleteServer,
+    setServerOrderLocal,
+    saveServerOrder,
     upsertBastion,
     deleteBastion,
     savePollInterval,
@@ -359,6 +361,12 @@ export default function App() {
         activeView={activeView}
         onSelectServer={(serverId) => {
           selectServer(serverId);
+        }}
+        onReorderServers={setServerOrderLocal}
+        onReorderServersEnd={() => {
+          saveServerOrder().catch((error) => {
+            pushToast("error", `Failed to save server order: ${error instanceof Error ? error.message : String(error)}`);
+          });
         }}
         onChangeView={setActiveView}
       />

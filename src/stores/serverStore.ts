@@ -17,6 +17,8 @@ interface ServerState {
   selectServer: (serverId: string) => void;
   upsertServer: (server: ServerConfig) => Promise<void>;
   deleteServer: (serverId: string) => Promise<void>;
+  setServerOrderLocal: (servers: ServerConfig[]) => void;
+  saveServerOrder: () => Promise<void>;
   upsertBastion: (bastion: BastionConfig) => Promise<void>;
   deleteBastion: (bastionId: string) => Promise<void>;
   savePollInterval: (seconds: number) => Promise<void>;
@@ -112,6 +114,21 @@ export const useServerStore = create<ServerState>((set, get) => ({
       config,
       get().selectedServerId === serverId ? config.servers[0]?.id ?? null : get().selectedServerId,
     ));
+  },
+
+  setServerOrderLocal: (servers) => set({ servers }),
+
+  saveServerOrder: async () => {
+    try {
+      const config = await invoke<AppConfig>("reorder_servers", {
+        serverIds: get().servers.map((server) => server.id),
+      });
+      set(applyConfig(config, get().selectedServerId));
+    } catch (error) {
+      // Roll back to the persisted order.
+      await get().loadServers();
+      throw error;
+    }
   },
 
   upsertBastion: async (bastion) => {

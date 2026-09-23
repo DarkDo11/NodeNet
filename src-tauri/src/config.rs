@@ -162,6 +162,22 @@ pub fn delete_server(server_id: &str) -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn reorder_servers(server_ids: &[String]) -> Result<AppConfig> {
+    let mut config = load_config()?;
+    let mut remaining = std::mem::take(&mut config.servers);
+    let mut ordered = Vec::with_capacity(remaining.len());
+    for id in server_ids {
+        if let Some(index) = remaining.iter().position(|server| &server.id == id) {
+            ordered.push(remaining.remove(index));
+        }
+    }
+    // Servers missing from the requested order (e.g. added concurrently) keep their relative order at the end.
+    ordered.extend(remaining);
+    config.servers = ordered;
+    save_config(&config)?;
+    Ok(config)
+}
+
 pub fn upsert_bastion(mut bastion: BastionConfig) -> Result<AppConfig> {
     let mut config = load_config()?;
     if bastion.id.trim().is_empty() {
