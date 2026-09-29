@@ -25,7 +25,8 @@ type PresetId =
   | "region"
   | "hardenSsh"
   | "ufw"
-  | "panelSsl";
+  | "panelSsl"
+  | "adblockDns";
 
 interface PresetItem {
   id: PresetId;
@@ -212,6 +213,209 @@ const panelSslCommand = (host: string) => {
   ].join("\n");
 };
 
+// Ad-blocking DNS for a VPN node. Xray's freedom outbound resolves through
+// /etc/resolv.conf, so once unbound is the system resolver every ad and tracker
+// domain on the list comes back NXDOMAIN and the connection is never opened.
+// The list itself (~500k domains, built in the RavenVPN repo by
+// tools/routing/build_ads.py) is too big to ship inside a command, so the helper
+// downloads it and renders unbound's config on the server. Installed as a file
+// so that re-running it - by hand or from here - is how the list gets updated,
+// and `rollback` puts the old resolver back.
+const adblockHelperPath = "/usr/local/sbin/nodenet-adblock-dns";
+
+// String.raw keeps the awk escapes intact; the script deliberately avoids ${...}
+// so nothing in it is taken for a template placeholder.
+const adblockHelper = String.raw`#!/bin/bash
+# Managed by NodeNet. Ad-blocking DNS for a VPN node: unbound becomes the system
+# resolver, so Xray's freedom outbound (which resolves through /etc/resolv.conf)
+# gets NXDOMAIN for ad and tracker domains and never opens the connection.
+#   install  - install or update unbound and the blocklist
+#   rollback - restore the previous resolver and stop unbound
+set -e
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+BASE_URL=$NODENET_ADBLOCK_BASE_URL
+[ -n "$BASE_URL" ] || BASE_URL=https://api.nox-net.site/static/happ-routing/ads-lists
+D=/etc/unbound/unbound.conf.d
+RPZ=/var/lib/unbound/ads.rpz
+PREV=/root/nox-unbound.prev
+# One hostname per line and nothing else: these lines are pasted into unbound's
+# config verbatim, so a quote or a stray HTML page must never get through.
+HOST_RE='^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9-])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$'
+IP_RE='^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'
+
+die() { echo "error: $*" >&2; exit 1; }
+
+rollback() {
+  if [ -e /etc/resolv.conf.nox-bak ] || [ -L /etc/resolv.conf.nox-bak ]; then
+    mv -f /etc/resolv.conf.nox-bak /etc/resolv.conf
+  fi
+  systemctl disable --now unbound 2>/dev/null || true
+  rm -f "$D"/nox-*.conf "$RPZ"
+  echo "Previous resolver restored, unbound stopped."
+}
+
+write_base_conf() {
+  cat > "$1" <<'CONF'
+# Managed by NodeNet (nodenet-adblock-dns). Local resolver for Xray.
+server:
+    interface: 127.0.0.1
+    access-control: 127.0.0.0/8 allow
+    num-threads: 1
+    msg-cache-size: 32m
+    rrset-cache-size: 64m
+    prefetch: yes
+    serve-expired: yes
+    hide-identity: yes
+    hide-version: yes
+    module-config: "respip validator iterator"
+    # A public name must never resolve to an internal address (DNS rebinding).
+    private-address: 0.0.0.0/8
+    private-address: 10.0.0.0/8
+    private-address: 100.64.0.0/10
+    private-address: 127.0.0.0/8
+    private-address: 169.254.0.0/16
+    private-address: 172.16.0.0/12
+    private-address: 192.168.0.0/16
+    private-address: ::/128
+    private-address: ::1/128
+    private-address: ::ffff:0:0/96
+    private-address: fc00::/7
+    private-address: fe80::/10
+    tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+
+# Forward over DNS-over-TLS so the hosting provider cannot see the names.
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: 1.1.1.1@853#cloudflare-dns.com
+    forward-addr: 8.8.8.8@853#dns.google
+    forward-addr: 1.0.0.1@853#cloudflare-dns.com
+CONF
+}
+
+install_all() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  command -v apt-get >/dev/null 2>&1 || die "only Debian/Ubuntu (apt) are supported"
+
+  # Another resolver already bound to :53 would answer half the queries.
+  other=$(ss -lnup 2>/dev/null | awk '$4 ~ /:53$/' | grep -oE '"[^"]+"' | tr -d '"' | sort -u | grep -vxE 'unbound|systemd-resolve' || true)
+  [ -z "$other" ] || die "port 53 is already used by: $other - remove it first"
+
+  if ! systemctl is-active --quiet unbound; then
+    avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+    [ "$avail" -ge 600 ] || die "needs ~350 MB RAM, only $avail MB available"
+  fi
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  echo "Downloading the blocklist from $BASE_URL"
+  for f in ads-suffix.txt ads-exact.txt ads-allow.txt ads-manual-ips.txt; do
+    curl -fsSL --max-time 180 "$BASE_URL/$f" -o "$tmp/$f" || die "download failed: $f"
+  done
+  for f in ads-suffix.txt ads-exact.txt ads-allow.txt; do
+    if grep -vEq "$HOST_RE" "$tmp/$f"; then die "$f contains lines that are not hostnames"; fi
+  done
+  grep -vE '^[[:space:]]*(#|$)' "$tmp/ads-manual-ips.txt" | sed 's/#.*//; s/[[:space:]]//g' > "$tmp/ips"
+  if grep -vEq "$IP_RE" "$tmp/ips"; then die "ads-manual-ips.txt contains lines that are not IPv4/CIDR"; fi
+  n=$(wc -l < "$tmp/ads-suffix.txt")
+  [ "$n" -ge 100000 ] || die "ads-suffix.txt looks truncated ($n lines)"
+
+  { echo "server:"
+    awk '{printf "    local-zone: \"%s.\" always_nxdomain\n", $1}' "$tmp/ads-suffix.txt"
+    awk '{printf "    local-zone: \"%s.\" transparent\n", $1}' "$tmp/ads-allow.txt"
+  } > "$tmp/nox-ads-zones.conf"
+  { echo '$TTL 3600'
+    echo '$ORIGIN ads.rpz.'
+    echo "@ SOA localhost. root.localhost. $(date +%s) 86400 3600 604800 3600"
+    echo "@ NS localhost."
+    awk '{print $1 " CNAME ."}' "$tmp/ads-exact.txt"
+    awk -F'[./]' '{p = (NF == 5) ? $5 : 32; print p "." $4 "." $3 "." $2 "." $1 ".rpz-ip CNAME ."}' "$tmp/ips"
+  } > "$tmp/ads.rpz"
+  write_base_conf "$tmp/nox-dns.conf"
+  printf 'rpz:\n    name: ads.rpz.\n    zonefile: %s\n    rpz-log: no\n' "$RPZ" > "$tmp/nox-ads.conf"
+
+  # The package's own helper must not touch resolv.conf; it is switched below,
+  # and only once unbound has proved it answers correctly.
+  [ -f /etc/default/unbound ] || printf 'RESOLVCONF=false\n' > /etc/default/unbound
+  if ! command -v unbound >/dev/null 2>&1 || ! command -v dig >/dev/null 2>&1; then
+    echo "Installing unbound"
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unbound dnsutils ca-certificates >/dev/null
+  fi
+
+  rm -rf "$PREV" && mkdir -p "$PREV"
+  cp -p "$D"/nox-*.conf "$RPZ" "$PREV"/ 2>/dev/null || true
+  restore() {
+    rm -f "$D"/nox-*.conf "$RPZ"
+    cp -p "$PREV"/*.conf "$D"/ 2>/dev/null || true
+    cp -p "$PREV"/ads.rpz "$RPZ" 2>/dev/null || true
+    systemctl restart unbound 2>/dev/null || true
+  }
+
+  rm -f "$D"/nox-*.conf
+  install -m 644 "$tmp/nox-dns.conf" "$D/nox-dns.conf"
+  install -m 644 "$tmp/nox-ads.conf" "$D/nox-ads.conf"
+  install -m 644 "$tmp/nox-ads-zones.conf" "$D/nox-ads-zones.conf"
+  install -m 644 -o unbound "$tmp/ads.rpz" "$RPZ"
+  unbound-checkconf >/dev/null || { restore; die "unbound rejected the config - previous one restored"; }
+  systemctl enable -q unbound
+  systemctl restart unbound
+
+  st() { dig @127.0.0.1 +time=3 +tries=2 "$1" A | awk '/status:/{print $6}' | tr -d ,; }
+  for _ in $(seq 20); do [ "$(st google.com)" = NOERROR ] && break; sleep 1; done
+  ok=1
+  [ "$(st google.com)" = NOERROR ] || ok=0
+  [ "$(st doubleclick.net)" = NXDOMAIN ] || ok=0
+  [ "$(dig @127.0.0.1 +time=5 +tries=2 +short 127.0.0.1.nip.io A | grep -cE '^[0-9.]+$')" = 0 ] || ok=0
+  if [ "$ok" = 0 ]; then
+    if grep -qx "nameserver 127.0.0.1" /etc/resolv.conf; then
+      restore; die "unbound answers wrong - previous files restored"
+    fi
+    die "unbound answers wrong - resolv.conf left untouched"
+  fi
+
+  if ! grep -qx "nameserver 127.0.0.1" /etc/resolv.conf; then
+    cp -P /etc/resolv.conf /etc/resolv.conf.nox-bak
+    printf 'nameserver 127.0.0.1\noptions edns0 trust-ad\n' > /etc/resolv.conf.nox
+    mv -f /etc/resolv.conf.nox /etc/resolv.conf
+    echo "resolv.conf now points at unbound (previous one kept as /etc/resolv.conf.nox-bak)"
+  fi
+
+  # Xray only goes through unbound when it resolves via the system. A dns
+  # section with its own servers in the 3x-ui template bypasses the blocklist.
+  cfg=/usr/local/x-ui/bin/config.json
+  if [ -f "$cfg" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$cfg" <<'PY' || true
+import json, sys
+c = json.load(open(sys.argv[1]))
+servers = (c.get("dns") or {}).get("servers") or []
+own = [s for s in servers if (s.get("address") if isinstance(s, dict) else s) not in ("localhost", "127.0.0.1")]
+if own:
+    print("warning: Xray has its own DNS servers %s - set dns.servers to [\"localhost\"] in the 3x-ui Xray template, or the blocklist is bypassed" % own)
+PY
+  fi
+
+  echo "Done: $n domains blocked, unbound $(( $(ps -o rss= -C unbound | head -n 1) / 1024 )) MB, $(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo) MB RAM available."
+}
+
+ACTION=$1
+[ -n "$ACTION" ] || ACTION=install
+case "$ACTION" in
+  install|update) install_all ;;
+  rollback) rollback ;;
+  *) die "usage: $0 install|rollback" ;;
+esac`;
+
+const adblockDnsCommand = () =>
+  [
+    `cat > ${adblockHelperPath} <<'NODENET_ADBLOCK_DNS'`,
+    adblockHelper,
+    "NODENET_ADBLOCK_DNS",
+    `chmod 755 ${adblockHelperPath}`,
+    `${adblockHelperPath} install`,
+  ].join("\n");
+
 const presets: PresetItem[] = [
   {
     id: "sshKey",
@@ -283,6 +487,15 @@ const presets: PresetItem[] = [
       "Issues a Let's Encrypt certificate for the panel, serves the panel over HTTPS, and teaches renewals to open UFW and free port 80 on their own.",
     command: "",
     recommended: true,
+    outputWindow: true,
+  },
+  {
+    id: "adblockDns",
+    name: "Ad-blocking DNS (unbound + RPZ)",
+    description:
+      "Makes unbound the server's resolver with ~500k ad and tracker domains blocked, DNS-over-TLS upstream and rebinding protection. Run again to update the list.",
+    command: "",
+    recommended: false,
     outputWindow: true,
   },
 ];
@@ -433,6 +646,10 @@ export default function SetupPresets({ server, onPanelInfoSaved, onServerUpdated
 
     if (preset.id === "panelSsl") {
       return panelSslCommand(server.host);
+    }
+
+    if (preset.id === "adblockDns") {
+      return adblockDnsCommand();
     }
 
     if (preset.id === "sshKey") {
