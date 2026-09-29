@@ -5,58 +5,94 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::AppHandle;
 
-const METRICS_SCRIPT: &str = r#"
+/// Shell script that prints `key=value` metric lines. Shared by the app
+/// (`collect`) and the monitor agent, which embeds it verbatim.
+pub(crate) const METRICS_SCRIPT: &str = r#"
 export LC_ALL=C
 export LANG=C
 export LANGUAGE=C
 export LC_NUMERIC=C
+# CPU utilisation is the busy share of /proc/stat jiffies between two samples,
+# the same formula as top, htop and psutil. guest/guest_nice are already
+# included in user/nice, so only user..steal are summed; iowait counts as idle.
+# cpu_stat exposes the raw counters so the monitor agent can average over its
+# whole poll interval instead of this 1 s window.
+read_cpu_stat() {
+  awk '/^cpu / { total = 0; for (i = 2; i <= 9 && i <= NF; i++) total += $i; printf "%.0f %.0f\n", total, $5 + $6; exit }' /proc/stat 2>/dev/null
+}
+CPU=
+CPU_STAT=
+if [ -r /proc/stat ]; then
+  CPU_STAT_START=$(read_cpu_stat)
+  sleep 1
+  CPU_STAT=$(read_cpu_stat)
+  CPU=$(printf '%s %s\n' "$CPU_STAT_START" "$CPU_STAT" | awk 'NF == 4 && $3 > $1 {
+    total = $3 - $1;
+    idle = $4 - $2;
+    if (idle < 0) idle = 0;
+    if (idle > total) idle = total;
+    printf "%.1f", (total - idle) / total * 100;
+  }')
+fi
+# RAM used = MemTotal - MemAvailable, as reported by free(1) from procps 4 and
+# psutil. The "used" column of older free versions means different things, so
+# free is only a fallback when /proc/meminfo is missing.
 RAM_TOTAL=0
 RAM_USED=0
-if command -v free >/dev/null 2>&1; then
-read RAM_TOTAL RAM_USED <<EOF
-$(free -m | awk '/Mem:/ {print $2 + 0, $3 + 0; found = 1} END {if (!found) print "0 0"}')
-EOF
-elif [ -r /proc/meminfo ]; then
+if [ -r /proc/meminfo ]; then
 read RAM_TOTAL RAM_USED <<EOF
 $(awk '
-  /^MemTotal:/ { total = int($2 / 1024) }
-  /^MemAvailable:/ { available = int($2 / 1024) }
+  /^MemTotal:/ { total = $2 }
+  /^MemFree:/ { free = $2 }
+  /^Buffers:/ { buffers = $2 }
+  /^Cached:/ { cached = $2 }
+  /^SReclaimable:/ { reclaimable = $2 }
+  /^MemAvailable:/ { available = $2; has_available = 1 }
   END {
-    if (total < 0) total = 0;
-    if (available < 0) available = 0;
+    if (!has_available) available = free + buffers + cached + reclaimable;
     used = total - available;
     if (used < 0) used = 0;
-    print total, used;
+    printf "%.0f %.0f\n", total / 1024, used / 1024;
   }
 ' /proc/meminfo)
 EOF
+elif command -v free >/dev/null 2>&1; then
+read RAM_TOTAL RAM_USED <<EOF
+$(free -m | awk '/Mem:/ {print $2 + 0, $3 + 0; found = 1} END {if (!found) print "0 0"}')
+EOF
 fi
+# Disk use % matches df's Use% (used / (used + available), reserved blocks
+# excluded) but with one decimal instead of df's rounded-up integer.
 DISK_TOTAL=--
 DISK_USED=--
 DISK_PERCENT=0
 if command -v df >/dev/null 2>&1; then
 read DISK_TOTAL DISK_USED DISK_PERCENT <<EOF
-$(df -P -h / 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5 + 0; found = 1} END {if (!found) print "-- -- 0"}')
+$(df -P -k / 2>/dev/null | awk '
+  function human(kb,   value, idx) {
+    value = kb;
+    idx = 1;
+    while (value >= 1024 && idx < 5) { value /= 1024; idx++ }
+    if (idx > 1 && value < 10) return sprintf("%.1f%s", value, substr("KMGTP", idx, 1));
+    return sprintf("%.0f%s", value, substr("KMGTP", idx, 1));
+  }
+  NR == 2 && $2 > 0 {
+    capacity = $3 + $4;
+    percent = capacity > 0 ? $3 / capacity * 100 : 0;
+    printf "%s %s %.1f\n", human($2), human($3), percent;
+    found = 1;
+  }
+  END { if (!found) print "-- -- 0" }
+')
 EOF
 fi
 LOAD_AVERAGE="0 0 0"
 if [ -r /proc/loadavg ]; then
   LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
 fi
-LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
 CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
 CPU_CORES=$(printf '%s\n' "$CPU_CORES" | awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1 > 0 {print $1}')
 if [ -z "$CPU_CORES" ]; then CPU_CORES=1; fi
-CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" '
-  BEGIN {
-    if (cores <= 0 || load_value < 0) {
-      exit 1;
-    }
-    printf "%.1f", (load_value / cores) * 100;
-  }')
-if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then
-  CPU=
-fi
 UPTIME_SEC=0
 if [ -r /proc/uptime ]; then
   UPTIME_SEC=$(awk '{printf "%.0f", $1}' /proc/uptime)
@@ -87,6 +123,7 @@ EOF
 fi
 printf 'cpu_percent=%s\n' "$CPU"
 printf 'cpu_cores=%s\n' "$CPU_CORES"
+printf 'cpu_stat=%s\n' "$CPU_STAT"
 printf 'ram_total_mb=%s\n' "$RAM_TOTAL"
 printf 'ram_used_mb=%s\n' "$RAM_USED"
 printf 'disk_total=%s\n' "$DISK_TOTAL"
@@ -112,7 +149,8 @@ printf 'google_204_ms=%s\n' "$GOOGLE_204_MS"
 pub struct ServerMetrics {
     pub server_id: String,
     pub timestamp: DateTime<Utc>,
-    /// Normalized CPU load %, calculated as load1 / online CPU cores * 100.
+    /// CPU utilisation % over a 1 s /proc/stat sample; load1 / cores * 100 on
+    /// hosts without /proc/stat.
     pub cpu_percent: f64,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,

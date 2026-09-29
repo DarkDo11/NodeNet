@@ -1,6 +1,6 @@
 use crate::{
     config::{load_config, AppConfig, BastionConfig, ServerConfig},
-    metrics::ServerMetrics,
+    metrics::{self, ServerMetrics},
     ssh,
 };
 use anyhow::{Context, Result};
@@ -307,6 +307,9 @@ if isinstance(runtime, dict):
     fail_counts = runtime.get("failCounts")
     if isinstance(fail_counts, dict):
         fail_counts.pop(SERVER_ID, None)
+    cpu_stats = runtime.get("cpuStats")
+    if isinstance(cpu_stats, dict):
+        cpu_stats.pop(SERVER_ID, None)
     save_json(RUNTIME_PATH, runtime)
 
 safe_id = sanitize(SERVER_ID)
@@ -866,8 +869,11 @@ WantedBy=timers.target
     )
 }
 
-fn agent_script() -> &'static str {
-    r#"#!/usr/bin/env python3
+fn agent_script() -> String {
+    AGENT_SCRIPT.replace("__METRICS_SCRIPT__", metrics::METRICS_SCRIPT)
+}
+
+const AGENT_SCRIPT: &str = r#"#!/usr/bin/env python3
 import json
 import os
 import pathlib
@@ -884,88 +890,10 @@ EVENTS_PATH = DATA_DIR / "events.json"
 RUNTIME_PATH = DATA_DIR / "runtime.json"
 MAX_EVENTS = 500
 MAX_POINTS_PER_SERVER = 20000
+# Longest gap between polls that is still averaged from cpu_stat counters.
+CPU_STAT_MAX_GAP_SEC = 900
 
-METRICS_SCRIPT = r'''
-export LC_ALL=C
-export LANG=C
-export LANGUAGE=C
-export LC_NUMERIC=C
-RAM_TOTAL=0
-RAM_USED=0
-if command -v free >/dev/null 2>&1; then
-read RAM_TOTAL RAM_USED <<EOF
-$(free -m | awk '/Mem:/ {print $2 + 0, $3 + 0; found = 1} END {if (!found) print "0 0"}')
-EOF
-elif [ -r /proc/meminfo ]; then
-read RAM_TOTAL RAM_USED <<EOF
-$(awk '
-  /^MemTotal:/ { total = int($2 / 1024) }
-  /^MemAvailable:/ { available = int($2 / 1024) }
-  END {
-    if (total < 0) total = 0;
-    if (available < 0) available = 0;
-    used = total - available;
-    if (used < 0) used = 0;
-    print total, used;
-  }
-' /proc/meminfo)
-EOF
-fi
-DISK_TOTAL=--
-DISK_USED=--
-DISK_PERCENT=0
-if command -v df >/dev/null 2>&1; then
-read DISK_TOTAL DISK_USED DISK_PERCENT <<EOF
-$(df -P -h / 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5 + 0; found = 1} END {if (!found) print "-- -- 0"}')
-EOF
-fi
-LOAD_AVERAGE="0 0 0"
-if [ -r /proc/loadavg ]; then
-  LOAD_AVERAGE=$(awk '{print $1, $2, $3}' /proc/loadavg)
-fi
-LOAD1=$(printf '%s\n' "$LOAD_AVERAGE" | awk '{print $1}')
-CPU_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || awk '/^processor[[:space:]]*:/ {count++} END {print count + 0}' /proc/cpuinfo 2>/dev/null)
-CPU_CORES=$(printf '%s\n' "$CPU_CORES" | awk 'NR==1 && $1 ~ /^[0-9]+$/ && $1 > 0 {print $1}')
-if [ -z "$CPU_CORES" ]; then CPU_CORES=1; fi
-CPU=$(awk -v load_value="$LOAD1" -v cores="$CPU_CORES" 'BEGIN { if (cores <= 0 || load_value < 0) exit 1; val = (load_value / cores) * 100; if (val > 100) val = 100; printf "%.1f", val; }')
-if ! printf '%s\n' "$CPU" | awk '/^[0-9]+([.][0-9]+)?$/ { ok = 1 } END { exit ok ? 0 : 1 }'; then CPU=; fi
-UPTIME_SEC=0
-if [ -r /proc/uptime ]; then
-  UPTIME_SEC=$(awk '{printf "%.0f", $1}' /proc/uptime)
-fi
-RX_BYTES=0
-TX_BYTES=0
-if [ -r /proc/net/dev ]; then
-read RX_BYTES TX_BYTES <<EOF
-$(awk 'NR>2 {
-  iface = $1; gsub(":", "", iface);
-  if (iface == "lo") next;
-  fallback_rx += $2; fallback_tx += $10;
-  if (iface ~ /^(eth|ens|enp|eno|em|p[0-9]|en[0-9]|wl|wlan|wwan|venet|bond|team|tun|tap|wg)/) {
-    rx += $2; tx += $10; matched += 1;
-  }
-} END { if (matched > 0) printf "%.0f %.0f\n", rx, tx; else printf "%.0f %.0f\n", fallback_rx, fallback_tx; }' /proc/net/dev)
-EOF
-fi
-printf 'cpu_percent=%s\n' "$CPU"
-printf 'cpu_cores=%s\n' "$CPU_CORES"
-printf 'ram_total_mb=%s\n' "$RAM_TOTAL"
-printf 'ram_used_mb=%s\n' "$RAM_USED"
-printf 'disk_total=%s\n' "$DISK_TOTAL"
-printf 'disk_used=%s\n' "$DISK_USED"
-printf 'disk_percent=%s\n' "$DISK_PERCENT"
-printf 'load_average=%s\n' "$LOAD_AVERAGE"
-printf 'uptime_sec=%s\n' "$UPTIME_SEC"
-printf 'rx_bytes=%s\n' "$RX_BYTES"
-printf 'tx_bytes=%s\n' "$TX_BYTES"
-GOOGLE_204_MS=
-if command -v curl >/dev/null 2>&1; then
-  GOOGLE_204_MS=$(curl -o /dev/null -s -w '%{time_total}' --max-time 8 https://www.google.com/generate_204 2>/dev/null | awk '{ if ($1 ~ /^[0-9]+([.][0-9]+)?$/) printf "%.1f", $1 * 1000 }')
-elif command -v wget >/dev/null 2>&1; then
-  GOOGLE_204_MS=$({ start=$(date +%s%3N 2>/dev/null || date +%s000); wget -q -T 8 -O /dev/null https://www.google.com/generate_204 >/dev/null 2>&1 && end=$(date +%s%3N 2>/dev/null || date +%s000) && awk -v start="$start" -v end="$end" 'BEGIN { printf "%.1f", end - start }'; } || true)
-fi
-printf 'google_204_ms=%s\n' "$GOOGLE_204_MS"
-'''
+METRICS_SCRIPT = r'''__METRICS_SCRIPT__'''
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1019,12 +947,39 @@ def format_uptime(seconds):
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
 
-def parse_metrics(server_id, output, ping_ms):
+def parse_values(output):
     values = {}
     for line in output.splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
+    return values
+
+def parse_cpu_stat(values):
+    parts = str(values.get("cpu_stat") or "").split()
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    total, idle = int(parts[0]), int(parts[1])
+    return (total, idle) if total > 0 else None
+
+def interval_cpu_percent(previous, current, uptime_sec, now):
+    # Average CPU use since the previous poll (what node_exporter + rate()
+    # reports). None without a usable previous sample: first run, reboot or a
+    # long gap. The script's own 1 s sample is kept in that case.
+    if not isinstance(previous, dict) or current is None:
+        return None
+    try:
+        prev_total, prev_idle, prev_at = int(previous["total"]), int(previous["idle"]), float(previous["at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    age = now - prev_at
+    total_delta = current[0] - prev_total
+    if age <= 0 or age > CPU_STAT_MAX_GAP_SEC or uptime_sec < age or total_delta <= 0:
+        return None
+    idle_delta = max(0, min(total_delta, current[1] - prev_idle))
+    return (total_delta - idle_delta) / total_delta * 100.0
+
+def parse_metrics(server_id, values, ping_ms):
     load = [parse_float(item) for item in values.get("load_average", "0 0 0").split()[:3]]
     while len(load) < 3:
         load.append(0.0)
@@ -1123,7 +1078,8 @@ def run_metrics(config, server):
         result = subprocess.run(ssh_command(config, server) + [METRICS_SCRIPT], capture_output=True, text=True, timeout=35)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "ssh failed").strip())
-    return parse_metrics(server.get("id"), result.stdout, (time.monotonic() - started) * 1000.0)
+    values = parse_values(result.stdout)
+    return parse_metrics(server.get("id"), values, (time.monotonic() - started) * 1000.0), parse_cpu_stat(values)
 
 def offline_point(server_id, previous=None):
     previous = previous or {}
@@ -1177,6 +1133,8 @@ def main():
     high_since = high_since_raw if isinstance(high_since_raw, dict) else {}
     high_alerted = set(str(item) for item in high_alerted_raw) if isinstance(high_alerted_raw, list) else set()
     fail_counts = fail_counts_raw if isinstance(fail_counts_raw, dict) else {}
+    cpu_stats_raw = runtime.get("cpuStats")
+    cpu_stats = cpu_stats_raw if isinstance(cpu_stats_raw, dict) else {}
     now = time.time()
 
     servers = config.get("servers")
@@ -1185,11 +1143,15 @@ def main():
 
     valid_servers = [server for server in servers if isinstance(server, dict) and server.get("id")]
 
+    valid_ids = set(str(server.get("id")) for server in valid_servers)
+    cpu_stats = {key: value for key, value in cpu_stats.items() if key in valid_ids}
+
     def collect(server):
         try:
-            return run_metrics(config, server), None
+            point, cpu_stat = run_metrics(config, server)
+            return point, cpu_stat, None
         except Exception as error:
-            return None, error
+            return None, None, error
 
     if valid_servers:
         with ThreadPoolExecutor(max_workers=min(len(valid_servers), 16)) as executor:
@@ -1197,7 +1159,7 @@ def main():
     else:
         results = []
 
-    for server, (point, error) in zip(valid_servers, results):
+    for server, (point, cpu_stat, error) in zip(valid_servers, results):
         server_id = server.get("id")
         history = cache.get(server_id) or []
         if not isinstance(history, list):
@@ -1206,6 +1168,13 @@ def main():
         if not isinstance(previous, dict):
             previous = None
         if error is None:
+            interval_cpu = interval_cpu_percent(cpu_stats.get(server_id), cpu_stat, point.get("uptimeSec", 0), now)
+            if interval_cpu is not None:
+                point["cpuPercent"] = round_one(interval_cpu)
+            if cpu_stat is None:
+                cpu_stats.pop(server_id, None)
+            else:
+                cpu_stats[server_id] = {"total": cpu_stat[0], "idle": cpu_stat[1], "at": now}
             fail_counts.pop(server_id, None)
             if server_id in down:
                 down.remove(server_id)
@@ -1234,6 +1203,7 @@ def main():
         "highCpuSince": high_since,
         "highCpuAlerted": sorted(high_alerted),
         "failCounts": fail_counts,
+        "cpuStats": cpu_stats,
     }
     save_json(METRICS_PATH, cache)
     save_json(EVENTS_PATH, events[:MAX_EVENTS])
@@ -1241,8 +1211,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-"#
-}
+"#;
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -1307,6 +1276,15 @@ _NN_DELTA_"#,
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn agent_embeds_shared_metrics_script() {
+        let script = agent_script();
+        assert!(!script.contains("__METRICS_SCRIPT__"));
+        assert!(script.contains(metrics::METRICS_SCRIPT));
+        // The shell script is embedded in a Python r''' literal.
+        assert!(!metrics::METRICS_SCRIPT.contains("'''"));
+    }
 
     #[test]
     fn decodes_gzipped_base64_json() {
