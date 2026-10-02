@@ -37,18 +37,30 @@ interface PresetItem {
   outputWindow?: boolean;
 }
 
-// A panel certificate is only worth having if it renews itself, and both ACME
-// clients renew unattended out of cron - certbot from its timer, acme.sh from
-// its own crontab entry. Neither can pass an HTTP-01 challenge on a server set
-// up the way these are: ufw keeps :80 shut, and nginx usually holds the port
-// anyway. So the renewal has to open the door itself and put everything back
-// afterwards. One helper owns that dance and both clients call it, rather than
-// each carrying its own half-correct copy.
+// A panel certificate is only worth having if it renews itself, and acme.sh
+// renews unattended out of its own crontab entry. An HTTP-01 challenge on a
+// server set up the way these are has two obstacles: ufw keeps :80 shut, and
+// nginx often holds the port. Stopping nginx to free it is not an option -
+// nginx usually fronts the tunnels, so every renewal would cut every client
+// off. Instead the certificate renews in webroot mode and the helper makes
+// whatever already sits on :80 serve the token: nginx gets a temporary route
+// for the panel's host and a graceful reload, and a free port gets a tiny
+// socat responder. Nothing that is running gets stopped.
 const acmeHelperPath = "/usr/local/sbin/nodenet-acme-port80";
+const acmeStateDir = "/var/lib/nodenet-acme";
+const acmeWebroot = `${acmeStateDir}/webroot`;
+
+// SIGHUP makes 3x-ui rebuild its web server from the settings table, which is
+// where the new certificate path lives. Since v3.0.2 that leaves xray running;
+// older builds restart xray in-process, which is still no worse than the
+// `systemctl restart` it replaces. The pattern pins the panel binary itself so
+// neither xray (a child of it) nor an open `x-ui` menu script gets the signal.
+const panelReloadCommand =
+  "pkill -HUP -f '^/usr/local/x-ui/x-ui( |$)' >/dev/null 2>&1 || true";
 
 const acmePortHelper = [
   "#!/bin/sh",
-  "# Managed by NodeNet. Frees and reopens :80 around an ACME HTTP-01 challenge.",
+  "# Managed by NodeNet. Gets an ACME HTTP-01 challenge through :80 without stopping anything.",
   // cron runs hooks with a bare PATH (/usr/bin:/bin on Debian and Ubuntu) while
   // ufw lives in /usr/sbin, so an unqualified `ufw` is simply not found there:
   // the port never opens and the renewal dies with a challenge timeout that
@@ -56,13 +68,105 @@ const acmePortHelper = [
   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   "export PATH",
   // Revert only what this script itself changed - a host that already had :80
-  // open, or nginx already stopped, has to be left exactly as it was found.
-  // The record lives on disk rather than under /run because a host rebooted
-  // mid-renewal would otherwise forget it while the ufw rule it left behind
-  // survives the reboot, and then nothing would ever close the port again.
-  "STATE_DIR=/var/lib/nodenet-acme",
+  // open has to be left exactly as it was found. The record lives on disk
+  // rather than under /run because a host rebooted mid-renewal would otherwise
+  // forget it while the ufw rule it left behind survives the reboot, and then
+  // nothing would ever close the port again.
+  `STATE_DIR=${acmeStateDir}`,
+  `WEBROOT=${acmeWebroot}`,
+  `SELF=${acmeHelperPath}`,
+  "",
+  "listeners() {",
+  "  ss -Hltn 'sport = :80' 2>/dev/null",
+  "}",
+  "",
+  "port80_owner() {",
+  "  if command -v ss >/dev/null 2>&1; then",
+  "    ss -Hltnp 'sport = :80' 2>/dev/null | head -n 1",
+  "  elif systemctl is-active --quiet nginx 2>/dev/null; then",
+  "    echo '\"nginx\"'",
+  "  fi",
+  "}",
+  "",
+  // The token is served by the helper itself, one socat child per request.
+  // Only bare token names are looked up, so the path cannot walk out of the
+  // challenge directory.
+  "start_responder() {",
+  "  if ! command -v socat >/dev/null 2>&1; then",
+  "    echo 'nodenet-acme: socat is missing, nothing can answer the challenge on :80' >&2",
+  "    return",
+  "  fi",
+  "  if [ -e /proc/net/if_inet6 ]; then addr=TCP6-LISTEN:80,ipv6only=0; else addr=TCP4-LISTEN:80; fi",
+  '  socat -T 10 "$addr,reuseaddr,fork" EXEC:"$SELF serve" </dev/null >/dev/null 2>&1 &',
+  '  echo $! > "$STATE_DIR/responder-pid"',
+  "  sleep 1",
+  '  kill -0 "$(cat "$STATE_DIR/responder-pid")" 2>/dev/null || echo "nodenet-acme: the challenge responder did not start on :80" >&2',
+  "}",
+  "",
+  // The route is matched by Host, so it only ever sees requests for the
+  // panel's own address and every other site on :80 keeps answering as before.
+  // It joins nginx's existing :80 sockets rather than opening new ones - a
+  // listen on an address nginx does not hold yet could fail to bind on reload.
+  "add_nginx_route() {",
+  '  name=$1',
+  '  case "$name" in *:*) name="[$name]" ;; esac',
+  '  socks=$(listeners)',
+  '  listen=""',
+  "  if printf '%s\\n' \"$socks\" | grep -qE '(^|[[:space:]])(0\\.0\\.0\\.0|\\*):80[[:space:]]'; then",
+  '    listen="    listen 80;"',
+  "  fi",
+  "  if printf '%s\\n' \"$socks\" | grep -qE '(^|[[:space:]])\\[::\\]:80[[:space:]]'; then",
+  '    listen="$listen',
+  '    listen [::]:80;"',
+  "  fi",
+  '  [ -n "$listen" ] || listen="    listen 80;"',
+  "  for dir in /etc/nginx/conf.d /etc/nginx/http.d /etc/nginx/sites-enabled; do",
+  '    [ -d "$dir" ] || continue',
+  '    conf="$dir/nodenet-acme.conf"',
+  '    cat > "$conf" <<EOF',
+  "# nodenet-acme-challenge: temporary, $SELF close removes it",
+  "server {",
+  "$listen",
+  "    server_name $name;",
+  "    location ^~ /.well-known/acme-challenge/ {",
+  "        root $WEBROOT;",
+  "        default_type text/plain;",
+  "    }",
+  "    location / {",
+  "        return 404;",
+  "    }",
+  "}",
+  "EOF",
+  // A directory nginx.conf never includes would make the route silently dead,
+  // so only a file that shows up in the full config dump counts.
+  "    if nginx -t >/dev/null 2>&1 && nginx -T 2>/dev/null | grep -q 'nodenet-acme-challenge'; then",
+  '      echo "$conf" > "$STATE_DIR/nginx-conf"',
+  "      systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1",
+  "      sleep 1",
+  "      return",
+  "    fi",
+  '    rm -f "$conf"',
+  "  done",
+  "  echo 'nodenet-acme: could not add the challenge route to nginx' >&2",
+  "}",
   "",
   "do_close() {",
+  '  if [ -f "$STATE_DIR/responder-pid" ]; then',
+  '    pid=$(cat "$STATE_DIR/responder-pid")',
+  // After a reboot the pid may belong to something else entirely.
+  '    if [ -n "$pid" ] && grep -q socat "/proc/$pid/cmdline" 2>/dev/null; then',
+  '      kill "$pid" 2>/dev/null',
+  "    fi",
+  '    rm -f "$STATE_DIR/responder-pid"',
+  "  fi",
+  '  if [ -f "$STATE_DIR/nginx-conf" ]; then',
+  '    conf=$(cat "$STATE_DIR/nginx-conf")',
+  '    case "$conf" in */nodenet-acme.conf) rm -f "$conf" ;; esac',
+  "    systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1",
+  '    rm -f "$STATE_DIR/nginx-conf"',
+  "  fi",
+  // Left by an older helper that still stopped nginx, should a host be updated
+  // in the middle of one of its renewals.
   '  if [ -f "$STATE_DIR/stopped-nginx" ]; then',
   "    systemctl start nginx >/dev/null 2>&1",
   '    rm -f "$STATE_DIR/stopped-nginx"',
@@ -75,7 +179,8 @@ const acmePortHelper = [
   "",
   'case "$1" in',
   "  open)",
-  '    mkdir -p "$STATE_DIR"',
+  '    mkdir -p "$STATE_DIR" "$WEBROOT/.well-known/acme-challenge"',
+  '    chmod 755 "$STATE_DIR" "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge"',
   '    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then',
   // A rule scoped to a single source address still reads as "80 ALLOW" while
   // leaving the port shut to the CA, so only an allow from Anywhere counts.
@@ -87,12 +192,41 @@ const acmePortHelper = [
   "        fi",
   "      fi",
   "    fi",
-  "    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then",
-  '      systemctl stop nginx >/dev/null 2>&1 && : > "$STATE_DIR/stopped-nginx"',
+  // No host means a hook an older NodeNet left on a standalone certificate:
+  // acme.sh answers the challenge itself there, so the firewall is all that
+  // is left to do.
+  '    if [ -n "$2" ]; then',
+  '      owner=$(port80_owner)',
+  '      if [ -z "$owner" ]; then',
+  "        start_responder",
+  "      elif printf '%s' \"$owner\" | grep -q '\"nginx\"'; then",
+  '        add_nginx_route "$2"',
+  "      else",
+  '        echo "nodenet-acme: :80 is held by something other than nginx and is left alone: $owner" >&2',
+  "      fi",
   "    fi",
   "    ;;",
   "  close)",
   "    do_close",
+  "    ;;",
+  "  serve)",
+  '    read -r method target version',
+  '    file=""',
+  '    case "$target" in',
+  "      /.well-known/acme-challenge/*)",
+  '        token=${target#/.well-known/acme-challenge/}',
+  '        case "$token" in',
+  "          ''|*[!A-Za-z0-9_-]*) ;;",
+  '          *) file="$WEBROOT/.well-known/acme-challenge/$token" ;;',
+  "        esac",
+  "        ;;",
+  "    esac",
+  '    if [ -n "$file" ] && [ -f "$file" ]; then',
+  "      printf 'HTTP/1.0 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: %s\\r\\nConnection: close\\r\\n\\r\\n' \"$(wc -c < \"$file\" | tr -d ' ')\"",
+  '      cat "$file"',
+  "    else",
+  "      printf 'HTTP/1.0 404 Not Found\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n'",
+  "    fi",
   "    ;;",
   // A renewal takes seconds, so a flag still standing long afterwards belongs
   // to a run that was killed between its two hooks - by a signal, an OOM kill
@@ -110,10 +244,57 @@ const acmePortHelper = [
   "exit 0",
 ].join("\n");
 
+// The renewal's ufw rule opens all of :80, not just the challenge route, so for
+// those seconds everything nginx serves there is reachable from anywhere. A
+// redirect or a static stub is harmless; a proxy to an internal service or a
+// status page is not, and it would have been hidden behind ufw until now. Only
+// worth saying when ufw does keep :80 shut - otherwise nothing new is exposed.
+// The scan reads http server blocks out of `nginx -T`: a block listening on :80
+// (or on nothing, which means :80) that proxies, lists directories or reports
+// status gets named, unless a server-level `return` answers every request
+// before any location is reached.
+const nginxPort80Audit = [
+  "if command -v nginx >/dev/null 2>&1 && ss -Hltnp 'sport = :80' 2>/dev/null | grep -q '\"nginx\"' \\",
+  "  && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active' \\",
+  "  && ! ufw status | grep -qE '^80(/tcp)?( \\(v6\\))?[[:space:]]+ALLOW[[:space:]]+Anywhere'; then",
+  "  EXPOSED=$(nginx -T 2>/dev/null | awk '",
+  "    function report() {",
+  "      if (flags != \"\" && !redirect && (listen80 || !haslisten)) printf \"  %s:%s\\n\", (names == \"\" ? \" (no server_name)\" : names), flags",
+  "    }",
+  "    { sub(/#.*/, \"\") }",
+  "    !instream && /(^|[ \\t;{])stream[ \\t]*\\{/ { instream = 1; sbase = depth }",
+  "    !instream && !insrv && /(^|[ \\t;{])server[ \\t]*\\{/ { insrv = 1; base = depth; names = \"\"; flags = \"\"; redirect = 0; listen80 = 0; haslisten = 0 }",
+  "    insrv && /(^|[ \\t;{])listen[ \\t]/ { haslisten = 1; if ($0 ~ /listen[ \\t]+([^ \\t;]*:)?80([ \\t;]|$)/) listen80 = 1 }",
+  "    insrv && /^[ \\t]*server_name[ \\t]/ { s = $0; sub(/^[ \\t]*server_name[ \\t]+/, \"\", s); sub(/;.*/, \"\", s); names = names \" \" s }",
+  "    insrv && depth == base + 1 && /^[ \\t]*return[ \\t]/ { redirect = 1 }",
+  "    insrv && /(proxy|fastcgi|uwsgi|scgi|grpc)_pass[ \\t]|stub_status|autoindex[ \\t]+on|dav_methods/ { match($0, /(proxy|fastcgi|uwsgi|scgi|grpc)_pass[ \\t]+[^;]*|stub_status|autoindex[ \\t]+on|dav_methods[^;]*/); flags = flags \" [\" substr($0, RSTART, RLENGTH) \"]\" }",
+  "    { o = gsub(/\\{/, \"{\"); c = gsub(/\\}/, \"}\"); depth += o - c }",
+  "    insrv && depth <= base { report(); insrv = 0 }",
+  "    instream && depth <= sbase { instream = 0 }",
+  "  ')",
+  '  if [ -n "$EXPOSED" ]; then',
+  '    echo "warning: renewals open :80 to everyone for a few seconds, and nginx serves more than a redirect or a stub there:" >&2',
+  "    printf '%s\\n' \"$EXPOSED\" >&2",
+  '    echo "Restrict these in nginx itself (allow/deny, or listen on 127.0.0.1) - ufw only covers them between renewals." >&2',
+  "  else",
+  '    echo "nginx on :80 only redirects or serves static files - opening it during renewals exposes nothing new."',
+  "  fi",
+  "fi",
+];
+
+// The host goes into hook commands that acme.sh evals on every renewal, and
+// into an nginx server_name, so anything beyond a hostname or IP is refused.
+const isPlainHost = (host: string) => /^[A-Za-z0-9.:-]+$/.test(host);
+
 const panelSslCommand = (host: string) => {
+  if (!isPlainHost(host)) {
+    return `echo ${shellQuote(`Refusing to issue a certificate for ${host}: not a plain hostname or IP.`)} >&2; exit 1`;
+  }
   const ip = shellQuote(host);
-  const openHook = shellQuote(`${acmeHelperPath} open`);
+  const openHook = shellQuote(`${acmeHelperPath} open ${host}`);
   const closeHook = shellQuote(`${acmeHelperPath} close`);
+  const legacyOpenHook = shellQuote(`${acmeHelperPath} open`);
+  const reloadCmd = shellQuote(panelReloadCommand);
   return [
     `cat > ${acmeHelperPath} <<'NODENET_ACME_HOOK'`,
     acmePortHelper,
@@ -125,16 +306,13 @@ const panelSslCommand = (host: string) => {
     "trap 'exit 129' HUP",
     "trap 'exit 130' INT",
     "trap 'exit 143' TERM",
-    // certbot runs every executable in these directories around each renewal it
-    // performs, whichever certificate triggered it - so wiring it here covers
-    // the certs on the box today and any issued later.
-    "if [ -d /etc/letsencrypt ]; then",
-    "  mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post",
-    `  printf '#!/bin/sh\\nexec ${acmeHelperPath} open\\n' > /etc/letsencrypt/renewal-hooks/pre/nodenet-acme-port80`,
-    `  printf '#!/bin/sh\\nexec ${acmeHelperPath} close\\n' > /etc/letsencrypt/renewal-hooks/post/nodenet-acme-port80`,
-    "  chmod 755 /etc/letsencrypt/renewal-hooks/pre/nodenet-acme-port80 /etc/letsencrypt/renewal-hooks/post/nodenet-acme-port80",
-    '  echo "certbot renewal hooks installed"',
-    "fi",
+    // Earlier versions hooked every certbot renewal on the box and stopped
+    // nginx around each one. Only the panel's own certificate is NodeNet's
+    // business, so those global hooks go.
+    "for d in pre post; do",
+    '  f="/etc/letsencrypt/renewal-hooks/$d/nodenet-acme-port80"',
+    `  if [ -f "$f" ] && grep -q '${acmeHelperPath}' "$f"; then rm -f "$f"; echo "removed the old certbot $d hook"; fi`,
+    "done",
     'ACME_HOME="$HOME/.acme.sh"',
     '[ -d "$ACME_HOME" ] || ACME_HOME=/root/.acme.sh',
     // 3x-ui keeps the panel's certificate path in its settings table and holds
@@ -144,17 +322,17 @@ const panelSslCommand = (host: string) => {
     "if command -v sqlite3 >/dev/null 2>&1 && [ -f /etc/x-ui/x-ui.db ]; then",
     `  PANEL_CERT=$(sqlite3 -readonly -cmd '.timeout 5000' /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key = 'webCertFile' AND value != '';" 2>/dev/null) || PANEL_CERT=""`,
     "fi",
+    // The challenge responder for a free :80 is built on socat.
+    "if ! command -v socat >/dev/null 2>&1; then",
+    "  if command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y socat >/dev/null 2>&1;",
+    "  elif command -v dnf >/dev/null 2>&1; then dnf install -y socat >/dev/null 2>&1;",
+    "  elif command -v yum >/dev/null 2>&1; then yum install -y socat >/dev/null 2>&1;",
+    "  elif command -v apk >/dev/null 2>&1; then apk add socat >/dev/null 2>&1; fi",
+    "fi",
     'if [ -n "$PANEL_CERT" ] && [ -f "$PANEL_CERT" ]; then',
     '  echo "Panel already serves $PANEL_CERT - keeping it, only wiring renewals."',
     "else",
     `  echo "No panel certificate configured - issuing one for ${host}."`,
-    // acme.sh's standalone challenge listener is built on socat.
-    "  if ! command -v socat >/dev/null 2>&1; then",
-    "    if command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y socat >/dev/null 2>&1;",
-    "    elif command -v dnf >/dev/null 2>&1; then dnf install -y socat >/dev/null 2>&1;",
-    "    elif command -v yum >/dev/null 2>&1; then yum install -y socat >/dev/null 2>&1;",
-    "    elif command -v apk >/dev/null 2>&1; then apk add socat >/dev/null 2>&1; fi",
-    "  fi",
     '  if [ ! -f "$ACME_HOME/acme.sh" ]; then',
     "    curl -s https://get.acme.sh | sh >/dev/null 2>&1",
     '    ACME_HOME="$HOME/.acme.sh"',
@@ -163,53 +341,80 @@ const panelSslCommand = (host: string) => {
     '  "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1',
     // Let's Encrypt issues for a bare IP only under its shortlived profile
     // (~6 days), which is exactly why renewal has to work unattended. Passing
-    // the hooks here makes acme.sh save them into this certificate's own
-    // renewal config, so every future cron run reuses them.
-    `  "$ACME_HOME/acme.sh" --issue -d ${ip} --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --pre-hook ${openHook} --post-hook ${closeHook} --force || { echo "Certificate issuance failed - see the output above." >&2; exit 1; }`,
+    // the hooks here makes acme.sh save them, and webroot mode, into this
+    // certificate's own renewal config, so every future cron run reuses them.
+    `  "$ACME_HOME/acme.sh" --issue -d ${ip} --webroot ${acmeWebroot} --server letsencrypt --certificate-profile shortlived --days 6 --pre-hook ${openHook} --post-hook ${closeHook} --force || { echo "Certificate issuance failed - see the output above." >&2; exit 1; }`,
     "  mkdir -p /root/cert/ip",
     // acme.sh exits non-zero when its reload command fails even though the cert
     // files were installed fine, so test for the files rather than the status.
-    `  "$ACME_HOME/acme.sh" --installcert --force -d ${ip} --key-file /root/cert/ip/privkey.pem --fullchain-file /root/cert/ip/fullchain.pem --reloadcmd 'systemctl restart x-ui 2>/dev/null || rc-service x-ui restart 2>/dev/null' >/dev/null 2>&1 || true`,
+    `  "$ACME_HOME/acme.sh" --installcert --force -d ${ip} --key-file /root/cert/ip/privkey.pem --fullchain-file /root/cert/ip/fullchain.pem --reloadcmd ${reloadCmd} >/dev/null 2>&1 || true`,
     '  { [ -f /root/cert/ip/fullchain.pem ] && [ -f /root/cert/ip/privkey.pem ]; } || { echo "Certificate files were not installed under /root/cert/ip." >&2; exit 1; }',
     "  chmod 600 /root/cert/ip/privkey.pem",
     "  chmod 644 /root/cert/ip/fullchain.pem",
     "  if [ -x /usr/local/x-ui/x-ui ]; then",
     "    /usr/local/x-ui/x-ui cert -webCert /root/cert/ip/fullchain.pem -webCertKey /root/cert/ip/privkey.pem",
-    "    systemctl restart x-ui >/dev/null 2>&1 || true",
+    `    ${panelReloadCommand}`,
     '    echo "Panel certificate set - the panel now answers over https."',
     "  else",
     '    echo "3x-ui binary not found at /usr/local/x-ui/x-ui - certificate issued but not attached to the panel." >&2',
     "  fi",
     "fi",
-    // Certificates issued before this preset ran - by 3x-ui's own CLI, or by
-    // hand - carry empty hooks in their saved renewal config, so their cron
-    // renewals would still walk into the closed port. Point them all at the
-    // helper. acme.sh stores hook commands base64-wrapped in these markers and
-    // decodes them when it reloads the config to renew.
+    // A panel certificate issued before this preset ran - by 3x-ui's own CLI,
+    // or by hand - renews standalone with no hooks, which walks into the closed
+    // port or into nginx. Switch exactly that certificate to webroot mode and
+    // the helper. acme.sh stores hook commands base64-wrapped in these markers
+    // and decodes them when it reloads the config to renew. Every other
+    // certificate on the box belongs to its owner and is left as it is, except
+    // for undoing the hooks an older NodeNet put on them.
     `PRE_B64=$(printf '%s' ${openHook} | base64 | tr -d '\\n')`,
     `POST_B64=$(printf '%s' ${closeHook} | base64 | tr -d '\\n')`,
+    `RELOAD_B64=$(printf '%s' ${reloadCmd} | base64 | tr -d '\\n')`,
+    `LEGACY_PRE_B64=$(printf '%s' ${legacyOpenHook} | base64 | tr -d '\\n')`,
     "WIRED=0",
     'for conf in "$ACME_HOME"/*/*.conf; do',
     '  [ -f "$conf" ] || continue',
-    `  grep -q '^Le_Domain=' "$conf" || continue`,
-    `  pre_line=$(printf "Le_PreHook='__ACME_BASE64__START_%s__ACME_BASE64__END_'" "$PRE_B64")`,
-    `  post_line=$(printf "Le_PostHook='__ACME_BASE64__START_%s__ACME_BASE64__END_'" "$POST_B64")`,
-    `  if grep -q '^Le_PreHook=' "$conf"; then sed -i "s|^Le_PreHook=.*|$pre_line|" "$conf"; else printf '%s\\n' "$pre_line" >> "$conf"; fi`,
-    `  if grep -q '^Le_PostHook=' "$conf"; then sed -i "s|^Le_PostHook=.*|$post_line|" "$conf"; else printf '%s\\n' "$post_line" >> "$conf"; fi`,
-    "  WIRED=$((WIRED + 1))",
+    `  domain=$(sed -n "s/^Le_Domain=//p" "$conf" | tr -d "'")`,
+    '  [ -n "$domain" ] || continue',
+    `  if [ "$domain" = ${ip} ]; then`,
+    `    for kv in "Le_Webroot='${acmeWebroot}'" "Le_PreHook='__ACME_BASE64__START_\${PRE_B64}__ACME_BASE64__END_'" "Le_PostHook='__ACME_BASE64__START_\${POST_B64}__ACME_BASE64__END_'" "Le_ReloadCmd='__ACME_BASE64__START_\${RELOAD_B64}__ACME_BASE64__END_'"; do`,
+    '      key=${kv%%=*}',
+    `      if grep -q "^$key=" "$conf"; then sed -i "s|^$key=.*|$kv|" "$conf"; else printf '%s\\n' "$kv" >> "$conf"; fi`,
+    "    done",
+    "    WIRED=$((WIRED + 1))",
+    `  elif grep -q "^Le_PreHook=.*$LEGACY_PRE_B64" "$conf"; then`,
+    `    sed -i '/^Le_PreHook=/d; /^Le_PostHook=/d' "$conf"`,
+    '    echo "$domain: removed the hooks an older NodeNet added (they stopped nginx)"',
+    `    if grep -q "^Le_Webroot='\\?no'\\?$" "$conf" && [ -n "$(ss -Hltn 'sport = :80' 2>/dev/null)" ]; then`,
+    '      echo "warning: $domain renews standalone while :80 is taken - switch it to --webroot, --nginx or DNS-01, or its renewal will fail" >&2',
+    "    fi",
+    "  fi",
     "done",
-    'echo "acme.sh renewal configs wired to the port helper: $WIRED"',
+    'echo "Panel certificate configs wired to the helper: $WIRED"',
+    // A panel certificate from certbot is pointed at the same webroot and hooks
+    // through its own renewal config. `reconfigure` dry-runs a renewal to prove
+    // the new settings, which also proves the route through nginx works.
+    'case "$PANEL_CERT" in',
+    "  /etc/letsencrypt/live/*)",
+    '    CERT_NAME=$(basename "$(dirname "$PANEL_CERT")")',
+    `    if certbot reconfigure --cert-name "$CERT_NAME" --webroot -w ${acmeWebroot} --pre-hook ${openHook} --post-hook ${closeHook} --deploy-hook ${reloadCmd} >/dev/null 2>&1; then`,
+    '      echo "certbot certificate $CERT_NAME switched to webroot renewals"',
+    "    else",
+    '      echo "warning: could not reconfigure certbot certificate $CERT_NAME (certbot 2.3+ needed) - its renewals are unchanged" >&2',
+    "    fi",
+    "    ;;",
+    "esac",
     // acme.sh renews only if its cron entry exists; a hand-installed acme.sh,
     // or one whose crontab was cleared, has none.
     `if [ -f "$ACME_HOME/acme.sh" ] && ! crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then`,
     '  "$ACME_HOME/acme.sh" --install-cronjob >/dev/null 2>&1 || true',
     "fi",
-    `crontab -l 2>/dev/null | grep 'acme.sh --cron' || echo "warning: no acme.sh cron entry - renewals will not run unattended" >&2`,
+    `if [ -f "$ACME_HOME/acme.sh" ]; then crontab -l 2>/dev/null | grep 'acme.sh --cron' || echo "warning: no acme.sh cron entry - renewals will not run unattended" >&2; fi`,
     `if ! crontab -l 2>/dev/null | grep -q '${acmeHelperPath} reap'; then`,
     `  (crontab -l 2>/dev/null; echo '*/5 * * * * ${acmeHelperPath} reap >/dev/null 2>&1') | crontab -`,
     '  echo "port-80 reaper scheduled"',
     "fi",
-    'echo "Done. Renewals now open port 80 and stop nginx by themselves, then restore both."',
+    ...nginxPort80Audit,
+    'echo "Done. Renewals open port 80 and serve the challenge through nginx or a temporary responder - nothing gets stopped."',
   ].join("\n");
 };
 
@@ -484,7 +689,7 @@ const presets: PresetItem[] = [
     id: "panelSsl",
     name: "Panel SSL with auto-renewal",
     description:
-      "Issues a Let's Encrypt certificate for the panel, serves the panel over HTTPS, and teaches renewals to open UFW and free port 80 on their own.",
+      "Issues a Let's Encrypt certificate for the panel, serves the panel over HTTPS, and renews it through nginx or a temporary responder on :80 - without stopping nginx or the tunnels.",
     command: "",
     recommended: true,
     outputWindow: true,
